@@ -1,13 +1,15 @@
 {
-  "version": "1.1",
-  "description": "Pump model configuration focused on two real cases only: chilled-water total-header flow allocation and cooling-water facility-flow aggregation allocation.",
+  "version": "1.2",
+  "description": "Pump model configuration focused on two real cases only: chilled-water total-header flow allocation and cooling-water facility-flow aggregation allocation. Pump head H is read directly from each pump head point.",
   "defaults": {
     "rated_frequency_hz": 50,
     "flow_unit": "m3/h",
     "head_unit": "m",
     "power_unit": "kW",
+    "efficiency_factor": 0.002725,
     "efficiency_formula": "eta = 0.002725 * Q * H / power",
     "speed_ratio_formula": "w = frequency / rated_frequency",
+    "head_source": "direct_pump_head_point",
     "valid_filters": {
       "min_flow": 0,
       "min_head": 0,
@@ -26,6 +28,10 @@
     "by_speed_ratio": {
       "description": "Allocate total group flow by each running pump speed ratio. Use this when parallel pumps run at different frequencies and pump models are similar.",
       "formula": "Q_i = Q_total * w_i / sum(w_running)"
+    },
+    "by_rated_flow_speed": {
+      "description": "Allocate total group flow by rated flow and speed ratio. Use this when parallel pumps have different rated flow values.",
+      "formula": "Q_i = Q_total * rated_flow_i * w_i / sum(rated_flow_j * w_j)"
     }
   },
   "pump_groups": [
@@ -148,6 +154,7 @@
     "For cooling_water groups, sum the configured facility flow points, optionally only for running facilities.",
     "Calculate each running pump speed ratio: w_i = frequency_i / rated_frequency_i.",
     "Allocate Q_total to each running pump according to allocation.method.",
+    "Read each pump head directly: H_i = configured pump.head point.",
     "Calculate each pump efficiency: eta_i = 0.002725 * Q_i * H_i / power_i.",
     "Apply valid_filters before regression."
   ],

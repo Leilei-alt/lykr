@@ -10,3 +10,8 @@ __pycache__/
 COP_FIT_20260818/__pycache__/
 pump_curve_regression/__pycache__/
 pump_curve_regression/output/
+pump_curve_web/backend/__pycache__/
+pump_curve_web/backend/static/
+pump_curve_web/frontend/node_modules/
+pump_curve_web/frontend/dist/
+pump_curve_web/browser_verification.png

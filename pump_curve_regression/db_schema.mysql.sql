@@ -4,6 +4,37 @@ CREATE DATABASE IF NOT EXISTS pump_curve_model
 
 USE pump_curve_model;
 
+CREATE TABLE IF NOT EXISTS pump_model_variables (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  point_name VARCHAR(191) NOT NULL,
+  role VARCHAR(64) NOT NULL,
+  group_id VARCHAR(128) NULL,
+  side ENUM('chilled_water', 'cooling_water', 'unknown') NOT NULL DEFAULT 'unknown',
+  device_id VARCHAR(128) NULL,
+  device_type ENUM('pump', 'facility', 'group', 'unknown') NOT NULL DEFAULT 'unknown',
+  unit VARCHAR(32) NULL,
+  description VARCHAR(512) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_pump_model_variables_point_role_group_device (point_name, role, group_id, device_id),
+  KEY idx_pump_model_variables_point (point_name),
+  KEY idx_pump_model_variables_group (group_id, side)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS pump_raw_point_values (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  dataset_name VARCHAR(128) NOT NULL,
+  sample_time DATETIME NOT NULL,
+  point_name VARCHAR(191) NOT NULL,
+  numeric_value DOUBLE NULL,
+  text_value VARCHAR(255) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_pump_raw_point_values_dataset_time_point (dataset_name, sample_time, point_name),
+  KEY idx_pump_raw_point_values_time (sample_time),
+  KEY idx_pump_raw_point_values_point_time (point_name, sample_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS pump_curve_runs (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   run_name VARCHAR(128) NOT NULL,
