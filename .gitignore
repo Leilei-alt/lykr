@@ -1,0 +1,12 @@
+﻿.venv/
+.idea/
+__pycache__/
+*.pyc
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+COP_FIT_20260818/__pycache__/
+pump_curve_regression/__pycache__/
+pump_curve_regression/output/

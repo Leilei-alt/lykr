@@ -1,0 +1,23 @@
+timestamp,pump_id,group_id,side,status,Q,H,w,eta
+2026-08-01 00:00:00,CHWP1,chw_group_1,chilled_water,1,220,31.2,0.72,0.665
+2026-08-01 00:05:00,CHWP1,chw_group_1,chilled_water,1,238,32.7,0.76,0.692
+2026-08-01 00:10:00,CHWP1,chw_group_1,chilled_water,1,252,34.4,0.80,0.715
+2026-08-01 00:15:00,CHWP1,chw_group_1,chilled_water,1,271,36.1,0.84,0.742
+2026-08-01 00:20:00,CHWP1,chw_group_1,chilled_water,1,288,37.8,0.88,0.758
+2026-08-01 00:25:00,CHWP1,chw_group_1,chilled_water,1,306,39.4,0.92,0.773
+2026-08-01 00:30:00,CHWP1,chw_group_1,chilled_water,1,323,41.1,0.96,0.786
+2026-08-01 00:35:00,CHWP1,chw_group_1,chilled_water,1,340,42.9,1.00,0.794
+2026-08-01 00:40:00,CHWP1,chw_group_1,chilled_water,1,355,44.0,1.02,0.789
+2026-08-01 00:45:00,CHWP1,chw_group_1,chilled_water,1,370,45.2,1.05,0.780
+2026-08-01 00:50:00,CHWP1,chw_group_1,chilled_water,1,386,46.0,1.08,0.762
+2026-08-01 00:55:00,CHWP1,chw_group_1,chilled_water,1,402,46.8,1.10,0.740
+2026-08-01 00:00:00,CWP1,cw_group_1,cooling_water,1,260,25.4,0.75,0.640
+2026-08-01 00:05:00,CWP1,cw_group_1,cooling_water,1,279,26.7,0.78,0.668
+2026-08-01 00:10:00,CWP1,cw_group_1,cooling_water,1,298,28.1,0.82,0.694
+2026-08-01 00:15:00,CWP1,cw_group_1,cooling_water,1,316,29.3,0.86,0.718
+2026-08-01 00:20:00,CWP1,cw_group_1,cooling_water,1,335,30.7,0.90,0.736
+2026-08-01 00:25:00,CWP1,cw_group_1,cooling_water,1,354,32.0,0.94,0.749
+2026-08-01 00:30:00,CWP1,cw_group_1,cooling_water,1,372,33.5,0.98,0.756
+2026-08-01 00:35:00,CWP1,cw_group_1,cooling_water,1,390,35.0,1.02,0.752
+2026-08-01 00:40:00,CWP1,cw_group_1,cooling_water,1,408,36.2,1.05,0.739
+2026-08-01 00:45:00,CWP1,cw_group_1,cooling_water,1,425,37.0,1.08,0.720

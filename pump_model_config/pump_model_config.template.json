@@ -1,0 +1,183 @@
+{
+  "version": "1.1",
+  "description": "Pump model configuration focused on two real cases only: chilled-water total-header flow allocation and cooling-water facility-flow aggregation allocation.",
+  "defaults": {
+    "rated_frequency_hz": 50,
+    "flow_unit": "m3/h",
+    "head_unit": "m",
+    "power_unit": "kW",
+    "efficiency_formula": "eta = 0.002725 * Q * H / power",
+    "speed_ratio_formula": "w = frequency / rated_frequency",
+    "valid_filters": {
+      "min_flow": 0,
+      "min_head": 0,
+      "min_power": 0,
+      "min_speed_ratio": 0.2,
+      "max_speed_ratio": 1.2,
+      "min_efficiency": 0,
+      "max_efficiency": 1
+    }
+  },
+  "allocation_methods": {
+    "equal": {
+      "description": "Allocate total group flow equally to all running pumps.",
+      "formula": "Q_i = Q_total / running_pump_count"
+    },
+    "by_speed_ratio": {
+      "description": "Allocate total group flow by each running pump speed ratio. Use this when parallel pumps run at different frequencies and pump models are similar.",
+      "formula": "Q_i = Q_total * w_i / sum(w_running)"
+    }
+  },
+  "pump_groups": [
+    {
+      "id": "chw_group_1",
+      "name": "Chilled water pump group 1",
+      "side": "chilled_water",
+      "description": "Chilled-water side: read one total-header flow point, then allocate Q_total to running chilled-water pumps.",
+      "facilities": [
+        {
+          "id": "CH1",
+          "name": "Chiller 1",
+          "status": "B101-CH.status"
+        },
+        {
+          "id": "CH2",
+          "name": "Chiller 2",
+          "status": "B102-CH.status"
+        }
+      ],
+      "pumps": [
+        {
+          "id": "CHWP1",
+          "name": "Chilled water pump 1",
+          "status": "CHWP1.status",
+          "frequency": "CHWP1.frequency",
+          "rated_frequency_hz": 50,
+          "power": "CHWP1.power",
+          "head": "CHWP1.head"
+        },
+        {
+          "id": "CHWP2",
+          "name": "Chilled water pump 2",
+          "status": "CHWP2.status",
+          "frequency": "CHWP2.frequency",
+          "rated_frequency_hz": 50,
+          "power": "CHWP2.power",
+          "head": "CHWP2.head"
+        }
+      ],
+      "flow_source": {
+        "method": "group_total_meter",
+        "total_flow": "CHW.total_flow",
+        "formula": "Q_total = CHW.total_flow"
+      },
+      "allocation": {
+        "method": "by_speed_ratio",
+        "formula": "Q_i = Q_total * w_i / sum(w_running)",
+        "fallback_method": "equal",
+        "fallback_formula": "Q_i = Q_total / running_pump_count"
+      }
+    },
+    {
+      "id": "cw_group_1",
+      "name": "Cooling water pump group 1",
+      "side": "cooling_water",
+      "description": "Cooling-water side: sum flow points from each cooling facility, then allocate Q_total to running cooling-water pumps.",
+      "facilities": [
+        {
+          "id": "CH1",
+          "name": "Chiller 1 cooling side",
+          "status": "B101-CH.status",
+          "flow": "B101-CH.cw_flow"
+        },
+        {
+          "id": "CH2",
+          "name": "Chiller 2 cooling side",
+          "status": "B102-CH.status",
+          "flow": "B102-CH.cw_flow"
+        },
+        {
+          "id": "CH3",
+          "name": "Chiller 3 cooling side",
+          "status": "B103-CH.status",
+          "flow": "B103-CH.cw_flow"
+        }
+      ],
+      "pumps": [
+        {
+          "id": "CWP1",
+          "name": "Cooling water pump 1",
+          "status": "CWP1.status",
+          "frequency": "CWP1.frequency",
+          "rated_frequency_hz": 50,
+          "power": "CWP1.power",
+          "head": "CWP1.head"
+        },
+        {
+          "id": "CWP2",
+          "name": "Cooling water pump 2",
+          "status": "CWP2.status",
+          "frequency": "CWP2.frequency",
+          "rated_frequency_hz": 50,
+          "power": "CWP2.power",
+          "head": "CWP2.head"
+        }
+      ],
+      "flow_source": {
+        "method": "sum_facility_flow",
+        "flow_points": [
+          "B101-CH.cw_flow",
+          "B102-CH.cw_flow",
+          "B103-CH.cw_flow"
+        ],
+        "only_running_facilities": true,
+        "formula": "Q_total = sum(flow of running cooling facilities)"
+      },
+      "allocation": {
+        "method": "by_speed_ratio",
+        "formula": "Q_i = Q_total * w_i / sum(w_running)",
+        "fallback_method": "equal",
+        "fallback_formula": "Q_i = Q_total / running_pump_count"
+      }
+    }
+  ],
+  "calculation_steps": [
+    "Select one pump group by side and group id.",
+    "Keep only running pumps by pump status.",
+    "For chilled_water groups, read Q_total directly from the configured total_flow point.",
+    "For cooling_water groups, sum the configured facility flow points, optionally only for running facilities.",
+    "Calculate each running pump speed ratio: w_i = frequency_i / rated_frequency_i.",
+    "Allocate Q_total to each running pump according to allocation.method.",
+    "Calculate each pump efficiency: eta_i = 0.002725 * Q_i * H_i / power_i.",
+    "Apply valid_filters before regression."
+  ],
+  "output_schema": {
+    "description": "The calculation layer should normalize both group strategies into this row format before regression.",
+    "fields": [
+      "timestamp",
+      "group_id",
+      "side",
+      "pump_id",
+      "pump_status",
+      "facility_running_count",
+      "pump_running_count",
+      "Q_total",
+      "Q",
+      "H",
+      "power",
+      "frequency",
+      "w",
+      "eta"
+    ]
+  },
+  "regression_models": {
+    "head_curve": {
+      "formula": "H = a * Q^2 + b * w * Q + c * w^2",
+      "coefficients": ["a", "b", "c"]
+    },
+    "efficiency_curve": {
+      "formula": "eta = j * (Q / w)^2 + k * (Q / w) + l",
+      "coefficients": ["j", "k", "l"]
+    }
+  }
+}
