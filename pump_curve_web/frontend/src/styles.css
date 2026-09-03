@@ -242,7 +242,7 @@ input[type="text"] {
 
 .selection-layout {
   display: grid;
-  grid-template-columns: 1fr 1fr 320px;
+  grid-template-columns: 1fr 1fr 1fr 320px;
   gap: 16px;
   align-items: start;
 }
@@ -265,6 +265,13 @@ input[type="text"] {
   border-radius: 6px;
   background: #e0f2fe;
   color: #075985;
+}
+
+.source-title {
+  margin: 14px 0 4px;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .check-row {

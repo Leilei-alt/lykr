@@ -6,7 +6,7 @@
           <p class="eyebrow">Pump Curve Regression</p>
           <h1>
             <span>水泵扬程及效率</span>
-            <span>与水泵流量Q的回归曲线</span>
+            <span>与水泵流量Q的拟合曲线</span>
           </h1>
         </div>
         <div class="health" :class="{ ok: apiOk, bad: apiOk === false }">
@@ -27,34 +27,51 @@
           </label>
           <label>
             <span>数据集</span>
-            <input v-model="form.dataset_name" type="text" />
+            <input v-model="form.dataset_name" type="text" @change="loadOptions" />
           </label>
         </div>
 
-        <div class="side-row">
+        <div v-if="options?.sources?.length" class="side-row">
           <button
-            v-for="side in sides"
-            :key="side.value"
+            v-for="source in options.sources"
+            :key="source.value"
             type="button"
-            :class="{ active: form.side === side.value }"
-            @click="chooseSide(side.value)"
+            :class="{ active: form.source_types.includes(source.value) }"
+            @click="toggleSource(source.value)"
           >
-            {{ side.label }}
+            {{ source.label }}
           </button>
         </div>
       </section>
 
-      <section v-if="activeGroup" class="selection-layout">
+      <section v-if="options" class="selection-layout">
         <div class="selection-panel">
           <div class="panel-heading">
-            <h2>冷机/冷却设备</h2>
-            <button type="button" @click="selectAllFacilities">全选</button>
+            <h2>流量来源设备</h2>
+            <button type="button" @click="selectAllFlowDevices">全选</button>
           </div>
-          <label v-for="facility in activeGroup.facilities" :key="facility.id" class="check-row">
-            <input v-model="form.facility_ids" type="checkbox" :value="facility.id" />
+          <template v-for="source in selectedSources" :key="source.value">
+            <h3 class="source-title">{{ source.label }}</h3>
+            <label v-for="device in source.devices" :key="`${source.value}-${device.id}`" class="check-row">
+              <input v-model="form.flow_device_ids" type="checkbox" :value="device.id" />
+              <span>
+                <strong>{{ device.name || device.id }}</strong>
+                <small>组号 {{ device.group_id }} / {{ device.row_count }} 条</small>
+              </span>
+            </label>
+          </template>
+        </div>
+
+        <div class="selection-panel">
+          <div class="panel-heading">
+            <h2>组号</h2>
+            <button type="button" @click="selectAllGroups">全选</button>
+          </div>
+          <label v-for="group in options.groups" :key="group.id" class="check-row">
+            <input v-model="form.group_ids" type="checkbox" :value="group.id" />
             <span>
-              <strong>{{ facility.name || facility.id }}</strong>
-              <small>{{ facility.status_point }}</small>
+              <strong>{{ group.name || group.id }}</strong>
+              <small>同组流量来源与水泵会被匹配计算</small>
             </span>
           </label>
         </div>
@@ -64,11 +81,11 @@
             <h2>水泵</h2>
             <button type="button" @click="selectAllPumps">全选</button>
           </div>
-          <label v-for="pump in activeGroup.pumps" :key="pump.id" class="check-row">
+          <label v-for="pump in filteredPumps" :key="pump.id" class="check-row">
             <input v-model="form.pump_ids" type="checkbox" :value="pump.id" />
             <span>
               <strong>{{ pump.name || pump.id }}</strong>
-              <small>{{ pump.frequency_point }} / {{ pump.head_point }}</small>
+              <small>组号 {{ pump.group_id }} / {{ pump.row_count }} 条</small>
             </span>
           </label>
         </div>
@@ -77,12 +94,16 @@
           <h2>当前条件</h2>
           <dl>
             <div>
-              <dt>侧别</dt>
-              <dd>{{ sideLabel(form.side) }}</dd>
+              <dt>流量来源</dt>
+              <dd>{{ sourceSummary }}</dd>
             </div>
             <div>
-              <dt>冷机/设备数量</dt>
-              <dd>{{ form.facility_ids.length }}</dd>
+              <dt>组号数量</dt>
+              <dd>{{ form.group_ids.length }}</dd>
+            </div>
+            <div>
+              <dt>来源设备</dt>
+              <dd>{{ form.flow_device_ids.length }}</dd>
             </div>
             <div>
               <dt>水泵数量</dt>
@@ -139,14 +160,10 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import RegressionChart from './components/RegressionChart.vue'
 
 const apiBase = 'http://127.0.0.1:8010'
-const sides = [
-  { value: 'chilled_water', label: '冷冻侧' },
-  { value: 'cooling_water', label: '冷却侧' },
-]
 
 const apiOk = ref(false)
 const options = ref(null)
@@ -158,18 +175,29 @@ const form = reactive({
   dataset_name: 'sample_raw_points',
   start_time: '',
   end_time: '',
-  side: 'chilled_water',
+  side: '',
+  source_types: [],
+  group_ids: [],
+  flow_device_ids: [],
   facility_ids: [],
   pump_ids: [],
 })
 
-const activeGroup = computed(() => {
-  return options.value?.groups?.find((group) => group.side === form.side)
+const selectedSources = computed(() => {
+  return options.value?.sources?.filter((source) => form.source_types.includes(source.value)) || []
 })
 
-function sideLabel(value) {
-  return sides.find((side) => side.value === value)?.label || value
-}
+const filteredPumps = computed(() => {
+  const groups = new Set(form.group_ids)
+  const pumps = options.value?.pumps || []
+  if (!groups.size) return pumps
+  return pumps.filter((pump) => groups.has(pump.group_id))
+})
+
+const sourceSummary = computed(() => {
+  const labels = selectedSources.value.map((source) => source.label)
+  return labels.length ? labels.join('、') : '-'
+})
 
 function formatNumber(value) {
   const number = Number(value)
@@ -177,28 +205,41 @@ function formatNumber(value) {
   return number.toFixed(3)
 }
 
-function chooseSide(side) {
-  form.side = side
+function toggleSource(sourceType) {
   result.value = null
-  void nextTick(resetSelections)
+  if (form.source_types.includes(sourceType)) {
+    form.source_types = form.source_types.filter((item) => item !== sourceType)
+  } else {
+    form.source_types = [...form.source_types, sourceType]
+  }
+  const visibleDeviceIds = new Set(selectedSources.value.flatMap((source) => source.devices.map((item) => item.id)))
+  form.flow_device_ids = form.flow_device_ids.filter((id) => visibleDeviceIds.has(id))
 }
 
 function resetSelections() {
-  const group = activeGroup.value
-  form.facility_ids = group?.facilities?.map((item) => item.id) || []
-  form.pump_ids = group?.pumps?.map((item) => item.id) || []
+  form.source_types = options.value?.sources?.map((item) => item.value) || []
+  form.group_ids = options.value?.groups?.map((item) => item.id) || []
+  selectAllFlowDevices()
+  selectAllPumps()
 }
 
-function selectAllFacilities() {
-  form.facility_ids = activeGroup.value?.facilities?.map((item) => item.id) || []
+function selectAllFlowDevices() {
+  form.flow_device_ids = selectedSources.value.flatMap((source) => source.devices.map((item) => item.id))
+  form.facility_ids = [...form.flow_device_ids]
+}
+
+function selectAllGroups() {
+  form.group_ids = options.value?.groups?.map((item) => item.id) || []
+  selectAllPumps()
 }
 
 function selectAllPumps() {
-  form.pump_ids = activeGroup.value?.pumps?.map((item) => item.id) || []
+  form.pump_ids = filteredPumps.value.map((item) => item.id)
 }
 
 async function loadOptions() {
   error.value = ''
+  result.value = null
   const response = await fetch(`${apiBase}/api/options?dataset_name=${encodeURIComponent(form.dataset_name)}`)
   if (!response.ok) throw new Error('无法读取后端选项')
   options.value = await response.json()
@@ -213,6 +254,7 @@ async function runRegression() {
   loading.value = true
   error.value = ''
   result.value = null
+  form.facility_ids = [...form.flow_device_ids]
   try {
     const response = await fetch(`${apiBase}/api/regression`, {
       method: 'POST',

@@ -13,6 +13,7 @@ The regression step still consumes direct pump samples:
 
 When `Q`, `w`, and `eta` cannot be read directly, use `sample_builder.py` first.
 In this project version, `H` is treated as a direct pump head point and is not calculated from pressure difference.
+The current web workflow reads separated header-controller, chiller, and pump tables, then joins rows by `sample_time` and `group_id`.
 
 ## Build Samples From Raw Points
 
@@ -27,11 +28,13 @@ The builder supports the two current flow cases:
 - chilled water: read group total flow, then allocate it to running pumps
 - cooling water: sum running cooling facility flows, then allocate it to running pumps
 
-Calculated fields:
+Calculated fields in the separated-table workflow:
 
 ```text
-w = frequency / rated_frequency
-eta = 0.002725 * Q * H / power
+Q_total = sum(flow_value) for the same source type, sample_time, and group_id
+discard sample when max(running pump w)-min(running pump w) > 0.02
+Q_i = Q_total / running_pump_count
+eta = 0.00275 * Q * H / power
 ```
 
 If only one pump is running in a group:
@@ -44,6 +47,12 @@ If multiple similar pumps are running:
 
 ```text
 Q_i = Q_total * w_i / sum(w_running)
+```
+
+In the separated-table workflow, multiple pumps are allocated equally after the speed-ratio consistency check:
+
+```text
+Q_i = Q_total / running_pump_count
 ```
 
 Example:
@@ -73,6 +82,12 @@ Or generate demo raw points directly into MySQL. This example creates 50 time po
 
 ```powershell
 python sample_builder.py seed-demo-db --mysql-exe G:\mysql-8.0.46-winx64\bin\mysql.exe --host 127.0.0.1 --port 3306 --user root --password "wdlwdl123." --database pump_curve_model --config F:\lykr\pump_model_config\pump_model_config.template.json --dataset-name sample_raw_points --sample-count 50
+```
+
+Generate demo data for the separated table structure:
+
+```powershell
+python sample_builder.py seed-separated-demo-db --mysql-exe G:\mysql-8.0.46-winx64\bin\mysql.exe --host 127.0.0.1 --port 3306 --user root --password "wdlwdl123." --database pump_curve_model --config F:\lykr\pump_model_config\pump_model_config.template.json --dataset-name sample_raw_points --sample-count 50
 ```
 
 Build regression samples by reading raw points from MySQL:

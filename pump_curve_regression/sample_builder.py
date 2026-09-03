@@ -10,7 +10,7 @@ This builder derives those fields from the pump model JSON config:
   - H is read directly from each pump's configured head point.
   - w = frequency / rated_frequency.
   - Q is allocated from group total flow.
-  - eta = 0.002725 * Q * H / power, where Q is m3/h, H is m, power is kW.
+  - eta = 0.00275 * Q * H / power, where Q is m3/h, H is m, power is kW.
 """
 
 from __future__ import annotations
@@ -27,7 +27,8 @@ import numpy as np
 import pandas as pd
 
 
-DEFAULT_EFFICIENCY_FACTOR = 9.81 / 3600.0
+DEFAULT_EFFICIENCY_FACTOR = 0.00275
+DEFAULT_SPEED_RATIO_TOLERANCE = 0.02
 
 
 @dataclass
@@ -156,6 +157,12 @@ def point_float(row: pd.Series, point_name: Optional[str]) -> Optional[float]:
 
 def point_running(row: pd.Series, point_name: Optional[str]) -> bool:
     return is_truthy(point_value(row, point_name))
+
+
+def optional_set(values: Optional[List[str]]) -> Optional[set[str]]:
+    if not values:
+        return None
+    return {str(value) for value in values}
 
 
 def valid_filters(config: Dict[str, Any]) -> Dict[str, float]:
@@ -367,6 +374,284 @@ def build_samples(config: Dict[str, Any], raw: pd.DataFrame, timestamp_column: O
                     samples.append(sample)
                 else:
                     issues.append(BuildIssue(timestamp, group_id, pump_id, reason or "invalid sample"))
+
+    return pd.DataFrame(samples), pd.DataFrame([asdict(issue) for issue in issues])
+
+
+def read_controller_rows_from_db(
+    mysql_exe: Path,
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    database: str,
+    dataset_name: str,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+) -> pd.DataFrame:
+    conditions = [f"dataset_name = {sql_quote(dataset_name)}"]
+    if start_time:
+        conditions.append(f"sample_time >= {sql_quote(start_time)}")
+    if end_time:
+        conditions.append(f"sample_time <= {sql_quote(end_time)}")
+    sql = f"""
+SELECT
+  dataset_name,
+  sample_time,
+  group_id,
+  controller_id,
+  flow_point_name,
+  flow_value,
+  status
+FROM pump_header_controller_values
+WHERE {" AND ".join(conditions)}
+ORDER BY sample_time, group_id, controller_id;
+"""
+    output = run_mysql(mysql_exe, host, port, user, password, sql, database)
+    rows = []
+    for line in output.splitlines():
+        if not line.strip() or line.startswith("dataset_name\t"):
+            continue
+        parts = line.split("\t")
+        if len(parts) != 7:
+            continue
+        rows.append(
+            {
+                "dataset_name": parts[0],
+                "sample_time": parts[1],
+                "group_id": parts[2],
+                "device_id": parts[3],
+                "flow_point_name": parts[4],
+                "flow_value": to_float(parts[5]),
+                "status": to_float(parts[6]),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def read_chiller_rows_from_db(
+    mysql_exe: Path,
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    database: str,
+    dataset_name: str,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+) -> pd.DataFrame:
+    conditions = [f"dataset_name = {sql_quote(dataset_name)}"]
+    if start_time:
+        conditions.append(f"sample_time >= {sql_quote(start_time)}")
+    if end_time:
+        conditions.append(f"sample_time <= {sql_quote(end_time)}")
+    sql = f"""
+SELECT
+  dataset_name,
+  sample_time,
+  group_id,
+  chiller_id,
+  flow_point_name,
+  flow_value,
+  status
+FROM pump_chiller_values
+WHERE {" AND ".join(conditions)}
+ORDER BY sample_time, group_id, chiller_id;
+"""
+    output = run_mysql(mysql_exe, host, port, user, password, sql, database)
+    rows = []
+    for line in output.splitlines():
+        if not line.strip() or line.startswith("dataset_name\t"):
+            continue
+        parts = line.split("\t")
+        if len(parts) != 7:
+            continue
+        rows.append(
+            {
+                "dataset_name": parts[0],
+                "sample_time": parts[1],
+                "group_id": parts[2],
+                "device_id": parts[3],
+                "flow_point_name": parts[4],
+                "flow_value": to_float(parts[5]),
+                "status": to_float(parts[6]),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def read_pump_rows_from_db(
+    mysql_exe: Path,
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    database: str,
+    dataset_name: str,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+) -> pd.DataFrame:
+    conditions = [f"dataset_name = {sql_quote(dataset_name)}"]
+    if start_time:
+        conditions.append(f"sample_time >= {sql_quote(start_time)}")
+    if end_time:
+        conditions.append(f"sample_time <= {sql_quote(end_time)}")
+    sql = f"""
+SELECT
+  dataset_name,
+  sample_time,
+  group_id,
+  pump_id,
+  status,
+  speed_ratio,
+  head,
+  power_kw
+FROM pump_device_values
+WHERE {" AND ".join(conditions)}
+ORDER BY sample_time, group_id, pump_id;
+"""
+    output = run_mysql(mysql_exe, host, port, user, password, sql, database)
+    rows = []
+    for line in output.splitlines():
+        if not line.strip() or line.startswith("dataset_name\t"):
+            continue
+        parts = line.split("\t")
+        if len(parts) != 8:
+            continue
+        rows.append(
+            {
+                "dataset_name": parts[0],
+                "sample_time": parts[1],
+                "group_id": parts[2],
+                "pump_id": parts[3],
+                "status": to_float(parts[4]),
+                "w": to_float(parts[5]),
+                "H": to_float(parts[6]),
+                "power": to_float(parts[7]),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_grouped_device_samples(
+    config: Dict[str, Any],
+    controller_rows: pd.DataFrame,
+    chiller_rows: pd.DataFrame,
+    pump_rows: pd.DataFrame,
+    source_types: Optional[List[str]] = None,
+    group_ids: Optional[List[str]] = None,
+    pump_ids: Optional[List[str]] = None,
+    flow_device_ids: Optional[List[str]] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    defaults = config.get("defaults", {})
+    efficiency_factor = float(defaults.get("efficiency_factor", DEFAULT_EFFICIENCY_FACTOR))
+    speed_tolerance = float(defaults.get("speed_ratio_tolerance", DEFAULT_SPEED_RATIO_TOLERANCE))
+    filters = valid_filters(config)
+    selected_sources = optional_set(source_types)
+    selected_groups = optional_set(group_ids)
+    selected_pumps = optional_set(pump_ids)
+    selected_flow_devices = optional_set(flow_device_ids)
+
+    source_frames = [
+        ("header_controller", controller_rows),
+        ("chiller", chiller_rows),
+    ]
+    samples: List[Dict[str, Any]] = []
+    issues: List[BuildIssue] = []
+
+    for source_type, flow_rows in source_frames:
+        if selected_sources and source_type not in selected_sources:
+            continue
+        if flow_rows.empty:
+            continue
+
+        working_flow = flow_rows.copy()
+        working_flow = working_flow[working_flow["flow_value"].notna()]
+        working_flow = working_flow[working_flow["flow_value"] > 0]
+        if "status" in working_flow.columns:
+            working_flow = working_flow[working_flow["status"].fillna(1) > 0]
+        if selected_groups:
+            working_flow = working_flow[working_flow["group_id"].astype(str).isin(selected_groups)]
+        if selected_flow_devices:
+            working_flow = working_flow[working_flow["device_id"].astype(str).isin(selected_flow_devices)]
+
+        for (sample_time, group_id), group_flow_rows in working_flow.groupby(["sample_time", "group_id"], sort=True):
+            q_total = float(group_flow_rows["flow_value"].sum())
+            if q_total <= 0:
+                issues.append(BuildIssue(str(sample_time), str(group_id), None, f"{source_type} Q_total <= 0"))
+                continue
+
+            group_pumps = pump_rows[
+                (pump_rows["sample_time"].astype(str) == str(sample_time))
+                & (pump_rows["group_id"].astype(str) == str(group_id))
+            ].copy()
+            if selected_pumps:
+                group_pumps = group_pumps[group_pumps["pump_id"].astype(str).isin(selected_pumps)]
+            group_pumps = group_pumps[group_pumps["status"].fillna(0) > 0]
+            if group_pumps.empty:
+                issues.append(BuildIssue(str(sample_time), str(group_id), None, f"{source_type} no running pump in same group"))
+                continue
+
+            w_values = group_pumps["w"].dropna().astype(float)
+            if len(w_values) != len(group_pumps):
+                issues.append(BuildIssue(str(sample_time), str(group_id), None, f"{source_type} pump speed ratio is missing"))
+                continue
+            speed_span = float(w_values.max() - w_values.min()) if len(w_values) > 1 else 0.0
+            if speed_span > speed_tolerance:
+                issues.append(
+                    BuildIssue(
+                        str(sample_time),
+                        str(group_id),
+                        None,
+                        f"{source_type} speed ratio span {speed_span:.4f} > {speed_tolerance:.4f}",
+                    )
+                )
+                continue
+
+            q_each = q_total / len(group_pumps)
+            for _, pump in group_pumps.iterrows():
+                pump_id = str(pump["pump_id"])
+                h = to_float(pump.get("H"))
+                power = to_float(pump.get("power"))
+                w = to_float(pump.get("w"))
+                eta = None
+                if h is not None and power is not None and power > 0:
+                    eta = efficiency_factor * q_each * h / power
+
+                sample = {
+                    "timestamp": str(sample_time),
+                    "group_id": str(group_id),
+                    "side": source_type,
+                    "source_type": source_type,
+                    "source_device_count": int(len(group_flow_rows)),
+                    "source_device_ids": ",".join(sorted(group_flow_rows["device_id"].astype(str).unique().tolist())),
+                    "pump_id": pump_id,
+                    "status": 1,
+                    "pump_status": 1,
+                    "facility_running_count": int(len(group_flow_rows)),
+                    "pump_running_count": int(len(group_pumps)),
+                    "Q_total": q_total,
+                    "Q": q_each,
+                    "H": h,
+                    "power": power,
+                    "frequency": None,
+                    "rated_frequency": None,
+                    "w": w,
+                    "eta": eta,
+                    "Q_source": source_type,
+                    "H_source": "pump_device_values.head",
+                    "w_source": "pump_device_values.speed_ratio",
+                    "eta_source": f"eta = {efficiency_factor} * Q * H / power",
+                    "allocation_method": "equal_after_speed_ratio_check",
+                    "speed_ratio_span": speed_span,
+                }
+
+                ok, reason = passes_filters(sample, filters)
+                if ok:
+                    sample["quality_flag"] = "valid"
+                    samples.append(sample)
+                else:
+                    issues.append(BuildIssue(str(sample_time), str(group_id), pump_id, reason or "invalid sample"))
 
     return pd.DataFrame(samples), pd.DataFrame([asdict(issue) for issue in issues])
 
@@ -634,6 +919,210 @@ ON DUPLICATE KEY UPDATE
     return len(rows)
 
 
+def generate_demo_separated_device_rows(sample_count: int = 50) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    raw = generate_demo_raw_points(sample_count)
+    controller_rows: List[Dict[str, Any]] = []
+    chiller_rows: List[Dict[str, Any]] = []
+    pump_rows: List[Dict[str, Any]] = []
+
+    for i, row in raw.iterrows():
+        sample_time = row["timestamp"]
+        controller_split = 0.52 + 0.025 * math.sin(i * 0.23)
+        header_total = float(row["CHW.total_flow"])
+        header_group = "header_group_1"
+        chiller_group = "chiller_group_1"
+
+        controller_rows.extend(
+            [
+                {
+                    "sample_time": sample_time,
+                    "group_id": header_group,
+                    "controller_id": "HCC1",
+                    "flow_point_name": "0x0000024C",
+                    "flow_value": round(header_total * controller_split, 3),
+                    "status": 1,
+                },
+                {
+                    "sample_time": sample_time,
+                    "group_id": header_group,
+                    "controller_id": "HCC2",
+                    "flow_point_name": "0x0000024C",
+                    "flow_value": round(header_total * (1 - controller_split), 3),
+                    "status": 1,
+                },
+            ]
+        )
+
+        for chiller_id, status_col, flow_col in [
+            ("CH1", "B101-CH.status", "B101-CH.cw_flow"),
+            ("CH2", "B102-CH.status", "B102-CH.cw_flow"),
+            ("CH3", "B103-CH.status", "B103-CH.cw_flow"),
+        ]:
+            chiller_rows.append(
+                {
+                    "sample_time": sample_time,
+                    "group_id": chiller_group,
+                    "chiller_id": chiller_id,
+                    "flow_point_name": "0x0000021E",
+                    "flow_value": float(row[flow_col]),
+                    "status": int(row[status_col]),
+                }
+            )
+
+        header_w_base = (float(row["CHWP1.frequency"]) + float(row["CHWP2.frequency"])) / 100.0
+        chiller_w_base = (float(row["CWP1.frequency"]) + float(row["CWP2.frequency"])) / 100.0
+        header_delta = 0.026 if i % 19 == 0 else 0.006
+        chiller_delta = 0.028 if i % 23 == 0 else 0.007
+
+        pump_rows.extend(
+            [
+                {
+                    "sample_time": sample_time,
+                    "group_id": header_group,
+                    "pump_id": "CHWP1",
+                    "status": 1,
+                    "speed_ratio": round(header_w_base - header_delta / 2, 4),
+                    "head": float(row["CHWP1.head"]),
+                    "power_kw": float(row["CHWP1.power"]),
+                },
+                {
+                    "sample_time": sample_time,
+                    "group_id": header_group,
+                    "pump_id": "CHWP2",
+                    "status": 1,
+                    "speed_ratio": round(header_w_base + header_delta / 2, 4),
+                    "head": float(row["CHWP2.head"]),
+                    "power_kw": float(row["CHWP2.power"]),
+                },
+                {
+                    "sample_time": sample_time,
+                    "group_id": chiller_group,
+                    "pump_id": "CWP1",
+                    "status": 1,
+                    "speed_ratio": round(chiller_w_base - chiller_delta / 2, 4),
+                    "head": float(row["CWP1.head"]),
+                    "power_kw": float(row["CWP1.power"]),
+                },
+                {
+                    "sample_time": sample_time,
+                    "group_id": chiller_group,
+                    "pump_id": "CWP2",
+                    "status": 1,
+                    "speed_ratio": round(chiller_w_base + chiller_delta / 2, 4),
+                    "head": float(row["CWP2.head"]),
+                    "power_kw": float(row["CWP2.power"]),
+                },
+            ]
+        )
+
+    return pd.DataFrame(controller_rows), pd.DataFrame(chiller_rows), pd.DataFrame(pump_rows)
+
+
+def seed_separated_device_values(
+    mysql_exe: Path,
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    database: str,
+    dataset_name: str,
+    controller_rows: pd.DataFrame,
+    chiller_rows: pd.DataFrame,
+    pump_rows: pd.DataFrame,
+) -> Dict[str, int]:
+    statements = [
+        f"DELETE FROM pump_header_controller_values WHERE dataset_name = {sql_quote(dataset_name)};",
+        f"DELETE FROM pump_chiller_values WHERE dataset_name = {sql_quote(dataset_name)};",
+        f"DELETE FROM pump_device_values WHERE dataset_name = {sql_quote(dataset_name)};",
+    ]
+
+    controller_values = []
+    for _, row in controller_rows.iterrows():
+        controller_values.append(
+            "("
+            f"{sql_quote(dataset_name)}, {sql_quote(row['sample_time'])}, {sql_quote(row['group_id'])}, "
+            f"{sql_quote(row['controller_id'])}, {sql_quote(row['flow_point_name'])}, "
+            f"{repr(float(row['flow_value']))}, {int(row['status'])}"
+            ")"
+        )
+    if controller_values:
+        statements.append(
+            """
+INSERT INTO pump_header_controller_values
+  (dataset_name, sample_time, group_id, controller_id, flow_point_name, flow_value, status)
+VALUES
+"""
+            + ",\n".join(controller_values)
+            + """
+ON DUPLICATE KEY UPDATE
+  group_id = VALUES(group_id),
+  flow_point_name = VALUES(flow_point_name),
+  flow_value = VALUES(flow_value),
+  status = VALUES(status);
+"""
+        )
+
+    chiller_values = []
+    for _, row in chiller_rows.iterrows():
+        chiller_values.append(
+            "("
+            f"{sql_quote(dataset_name)}, {sql_quote(row['sample_time'])}, {sql_quote(row['group_id'])}, "
+            f"{sql_quote(row['chiller_id'])}, {sql_quote(row['flow_point_name'])}, "
+            f"{repr(float(row['flow_value']))}, {int(row['status'])}"
+            ")"
+        )
+    if chiller_values:
+        statements.append(
+            """
+INSERT INTO pump_chiller_values
+  (dataset_name, sample_time, group_id, chiller_id, flow_point_name, flow_value, status)
+VALUES
+"""
+            + ",\n".join(chiller_values)
+            + """
+ON DUPLICATE KEY UPDATE
+  group_id = VALUES(group_id),
+  flow_point_name = VALUES(flow_point_name),
+  flow_value = VALUES(flow_value),
+  status = VALUES(status);
+"""
+        )
+
+    pump_values = []
+    for _, row in pump_rows.iterrows():
+        pump_values.append(
+            "("
+            f"{sql_quote(dataset_name)}, {sql_quote(row['sample_time'])}, {sql_quote(row['group_id'])}, "
+            f"{sql_quote(row['pump_id'])}, {int(row['status'])}, {repr(float(row['speed_ratio']))}, "
+            f"{repr(float(row['head']))}, {repr(float(row['power_kw']))}"
+            ")"
+        )
+    if pump_values:
+        statements.append(
+            """
+INSERT INTO pump_device_values
+  (dataset_name, sample_time, group_id, pump_id, status, speed_ratio, head, power_kw)
+VALUES
+"""
+            + ",\n".join(pump_values)
+            + """
+ON DUPLICATE KEY UPDATE
+  group_id = VALUES(group_id),
+  status = VALUES(status),
+  speed_ratio = VALUES(speed_ratio),
+  head = VALUES(head),
+  power_kw = VALUES(power_kw);
+"""
+        )
+
+    run_mysql(mysql_exe, host, port, user, password, "\n".join(statements), database)
+    return {
+        "controller_row_count": int(len(controller_rows)),
+        "chiller_row_count": int(len(chiller_rows)),
+        "pump_row_count": int(len(pump_rows)),
+    }
+
+
 def seed_database(
     mysql_exe: Path,
     host: str,
@@ -825,6 +1314,18 @@ def main() -> None:
     seed_demo_parser.add_argument("--dataset-name", default="sample_raw_points")
     seed_demo_parser.add_argument("--sample-count", type=int, default=50)
 
+    seed_separated_demo_parser = sub.add_parser("seed-separated-demo-db", help="Create MySQL tables and import demo rows into separated device tables.")
+    seed_separated_demo_parser.add_argument("--mysql-exe", default=Path("mysql"), type=Path)
+    seed_separated_demo_parser.add_argument("--host", default="127.0.0.1")
+    seed_separated_demo_parser.add_argument("--port", type=int, default=3306)
+    seed_separated_demo_parser.add_argument("--user", required=True)
+    seed_separated_demo_parser.add_argument("--password", required=True)
+    seed_separated_demo_parser.add_argument("--database", default="pump_curve_model")
+    seed_separated_demo_parser.add_argument("--schema", default=Path(__file__).with_name("db_schema.mysql.sql"), type=Path)
+    seed_separated_demo_parser.add_argument("--config", required=True, type=Path)
+    seed_separated_demo_parser.add_argument("--dataset-name", default="sample_raw_points")
+    seed_separated_demo_parser.add_argument("--sample-count", type=int, default=50)
+
     build_db_parser = sub.add_parser("build-db", help="Read raw point samples from MySQL and build derived Q/H/w/eta samples.")
     build_db_parser.add_argument("--mysql-exe", default=Path("mysql"), type=Path)
     build_db_parser.add_argument("--host", default="127.0.0.1")
@@ -869,6 +1370,37 @@ def main() -> None:
             args.sample_count,
         )
         print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif args.command == "seed-separated-demo-db":
+        config = read_config(args.config)
+        ensure_schema(args.mysql_exe, args.host, args.port, args.user, args.password, args.schema)
+        variables = collect_variables(config)
+        seed_variables(args.mysql_exe, args.host, args.port, args.user, args.password, args.database, variables)
+        controller_rows, chiller_rows, pump_rows = generate_demo_separated_device_rows(args.sample_count)
+        counts = seed_separated_device_values(
+            args.mysql_exe,
+            args.host,
+            args.port,
+            args.user,
+            args.password,
+            args.database,
+            args.dataset_name,
+            controller_rows,
+            chiller_rows,
+            pump_rows,
+        )
+        print(
+            json.dumps(
+                {
+                    "database": args.database,
+                    "config_file": str(args.config),
+                    "dataset_name": args.dataset_name,
+                    "variable_count": len(variables),
+                    **counts,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     elif args.command == "build-db":
         payload = build_from_database(
             args.mysql_exe,

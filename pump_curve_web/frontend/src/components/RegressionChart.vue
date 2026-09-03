@@ -25,6 +25,9 @@ const props = defineProps({
 const chartEl = ref(null)
 let chartInstance = null
 
+const ACTUAL_SCATTER_COLOR = '#2563eb'
+const THEORY_SCATTER_COLOR = '#f97316'
+
 const scatterCount = computed(() => props.chart?.scatter?.length || 0)
 
 function loadEcharts(assetBase) {
@@ -79,7 +82,6 @@ function buildOption() {
   const chart = props.chart || {}
   const scatter = chart.scatter || []
   const lines = chart.lines || []
-  const wValues = scatter.map((point) => Number(point[2])).filter(Number.isFinite)
   const xValues = [
     ...scatter.map((point) => Number(point[0])),
     ...lines.flatMap((line) => (line.points || []).map((point) => Number(point[0]))),
@@ -101,35 +103,58 @@ function buildOption() {
   const xAxisMax = xMax + xPad
   const yAxisMin = yMin - yPad
   const yAxisMax = yMax + yPad
+  const theoryScatterSeries = lines
+    .filter((line) => line.line_type === 'dashed')
+    .map((line) => ({
+      name: `${line.name || '理论曲线'}散点`,
+      type: 'scatter',
+      data: line.points || [],
+      symbolSize: 3.5,
+      itemStyle: {
+        color: THEORY_SCATTER_COLOR,
+        opacity: 0.48,
+        borderColor: '#7c2d12',
+        borderWidth: 0,
+      },
+      emphasis: {
+        focus: 'series',
+      },
+    }))
 
   const series = [
     {
       name: chart.scatter_name || '有效散点',
       type: 'scatter',
       data: scatter,
-      symbolSize: 7,
+      symbolSize: 4,
       itemStyle: {
-        opacity: 0.78,
+        color: ACTUAL_SCATTER_COLOR,
+        opacity: 0.46,
         borderColor: '#223044',
-        borderWidth: 0.4,
+        borderWidth: 0,
       },
       emphasis: {
         focus: 'series',
       },
     },
-    ...lines.map((line, index) => ({
-      name: line.name || `fit ${index + 1}`,
-      type: 'line',
-      data: line.points || [],
-      showSymbol: false,
-      smooth: false,
-      lineStyle: {
-        width: index === 0 && lines.length === 1 ? 2.8 : 2.1,
-      },
-      emphasis: {
-        focus: 'series',
-      },
-    })),
+    ...lines.map((line, index) => {
+      const isTheory = line.line_type === 'dashed'
+      return {
+        name: line.name || `fit ${index + 1}`,
+        type: 'line',
+        data: line.points || [],
+        showSymbol: false,
+        smooth: false,
+        lineStyle: {
+          width: isTheory ? 2.2 : index === 0 && lines.length === 1 ? 2.8 : 2.1,
+          type: line.line_type || 'solid',
+        },
+        emphasis: {
+          focus: 'series',
+        },
+      }
+    }),
+    ...theoryScatterSeries,
   ]
 
   return {
@@ -148,7 +173,7 @@ function buildOption() {
     },
     grid: {
       left: 62,
-      right: wValues.length ? 72 : 24,
+      right: 24,
       top: 56,
       bottom: 86,
       containLabel: true,
@@ -157,23 +182,6 @@ function buildOption() {
       { type: 'inside', xAxisIndex: 0, filterMode: 'none' },
       { type: 'slider', xAxisIndex: 0, height: 18, bottom: 12, filterMode: 'none' },
     ],
-    visualMap: wValues.length
-      ? {
-          type: 'continuous',
-          min: Math.min(...wValues),
-          max: Math.max(...wValues),
-          dimension: 2,
-          seriesIndex: 0,
-          right: 8,
-          top: 72,
-          text: ['w高', 'w低'],
-          itemHeight: 110,
-          calculable: true,
-          inRange: {
-            color: ['#38bdf8', '#22c55e', '#f59e0b', '#ef4444'],
-          },
-        }
-      : undefined,
     xAxis: {
       type: 'value',
       name: chart.x_name || 'Q',

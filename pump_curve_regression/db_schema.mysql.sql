@@ -35,6 +35,55 @@ CREATE TABLE IF NOT EXISTS pump_raw_point_values (
   KEY idx_pump_raw_point_values_point_time (point_name, sample_time)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS pump_header_controller_values (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  dataset_name VARCHAR(128) NOT NULL,
+  sample_time DATETIME NOT NULL,
+  group_id VARCHAR(128) NOT NULL COMMENT 'Unique group number shared by controllers and pumps',
+  controller_id VARCHAR(128) NOT NULL,
+  flow_point_name VARCHAR(191) NOT NULL DEFAULT '0x0000024C',
+  flow_value DOUBLE NOT NULL COMMENT 'Header controller flow Q, m3/h',
+  status TINYINT NOT NULL DEFAULT 1,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_header_controller_dataset_time_device (dataset_name, sample_time, controller_id),
+  KEY idx_header_controller_dataset_time_group (dataset_name, sample_time, group_id),
+  KEY idx_header_controller_group_time (group_id, sample_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS pump_chiller_values (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  dataset_name VARCHAR(128) NOT NULL,
+  sample_time DATETIME NOT NULL,
+  group_id VARCHAR(128) NOT NULL COMMENT 'Unique group number shared by chillers and pumps',
+  chiller_id VARCHAR(128) NOT NULL,
+  flow_point_name VARCHAR(191) NOT NULL DEFAULT '0x0000021E',
+  flow_value DOUBLE NOT NULL COMMENT 'Chiller flow Q, m3/h',
+  status TINYINT NOT NULL DEFAULT 1,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_chiller_dataset_time_device (dataset_name, sample_time, chiller_id),
+  KEY idx_chiller_dataset_time_group (dataset_name, sample_time, group_id),
+  KEY idx_chiller_group_time (group_id, sample_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS pump_device_values (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  dataset_name VARCHAR(128) NOT NULL,
+  sample_time DATETIME NOT NULL,
+  group_id VARCHAR(128) NOT NULL COMMENT 'Unique group number for this pump',
+  pump_id VARCHAR(128) NOT NULL,
+  status TINYINT NOT NULL COMMENT '1 means running',
+  speed_ratio DOUBLE NOT NULL COMMENT 'Direct speed ratio w, 0-1',
+  head DOUBLE NOT NULL COMMENT 'Pump head H, m',
+  power_kw DOUBLE NOT NULL COMMENT 'Pump input power, kW',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_pump_device_dataset_time_pump (dataset_name, sample_time, pump_id),
+  KEY idx_pump_device_dataset_time_group (dataset_name, sample_time, group_id),
+  KEY idx_pump_device_pump_time (pump_id, sample_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS pump_curve_runs (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   run_name VARCHAR(128) NOT NULL,
@@ -119,5 +168,42 @@ CREATE TABLE IF NOT EXISTS pump_curve_points (
   KEY idx_pump_curve_points_result_w_q (fit_result_id, speed_ratio, q),
   CONSTRAINT fk_pump_curve_points_result
     FOREIGN KEY (fit_result_id) REFERENCES pump_curve_fit_results(id)
+    ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS pump_theory_curve_sets (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  curve_name VARCHAR(128) NOT NULL COMMENT 'Theory curve display name',
+  pump_id VARCHAR(128) NOT NULL,
+  group_id VARCHAR(128) NULL,
+  side ENUM('chilled_water', 'cooling_water', 'unknown') NOT NULL DEFAULT 'unknown',
+  source_type VARCHAR(128) NULL COMMENT 'Manufacturer, design, manual input, etc.',
+  speed_ratio DOUBLE NOT NULL DEFAULT 1.0 COMMENT 'w for the source theory curve',
+  is_normalized TINYINT(1) NOT NULL DEFAULT 1,
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  remark VARCHAR(512) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_pump_theory_curve_sets_name_pump (curve_name, pump_id, side),
+  KEY idx_pump_theory_curve_sets_pump_side (pump_id, side, active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS pump_theory_curve_points (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  curve_set_id BIGINT UNSIGNED NOT NULL,
+  point_index INT NOT NULL,
+  q DOUBLE NULL COMMENT 'Source theory flow, m3/h',
+  h DOUBLE NULL COMMENT 'Source theory head, m',
+  eta DOUBLE NULL COMMENT 'Source theory efficiency, 0-1',
+  w DOUBLE NOT NULL DEFAULT 1.0,
+  q_eq DOUBLE NOT NULL COMMENT 'Normalized flow, Q / w',
+  h_eq DOUBLE NULL COMMENT 'Normalized head, H / w^2',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_pump_theory_curve_points_set_index (curve_set_id, point_index),
+  KEY idx_pump_theory_curve_points_set_qeq (curve_set_id, q_eq),
+  CONSTRAINT fk_pump_theory_curve_points_set
+    FOREIGN KEY (curve_set_id) REFERENCES pump_theory_curve_sets(id)
     ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

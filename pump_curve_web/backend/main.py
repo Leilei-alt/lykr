@@ -27,8 +27,12 @@ from pump_curve_regression import (  # noqa: E402
     representative_speed_ratios,
 )
 from sample_builder import (  # noqa: E402
+    build_grouped_device_samples,
     build_samples,
     read_config,
+    read_chiller_rows_from_db,
+    read_controller_rows_from_db,
+    read_pump_rows_from_db,
     read_raw_points_from_db,
     run_mysql,
     sql_quote,
@@ -48,7 +52,10 @@ class RegressionRequest(BaseModel):
     dataset_name: str = "sample_raw_points"
     start_time: str
     end_time: str
-    side: str
+    side: str = ""
+    source_types: List[str] = Field(default_factory=lambda: ["header_controller", "chiller"])
+    group_ids: List[str] = Field(default_factory=list)
+    flow_device_ids: List[str] = Field(default_factory=list)
     facility_ids: List[str] = Field(default_factory=list)
     pump_ids: List[str] = Field(default_factory=list)
     min_samples: int = 10
@@ -73,6 +80,21 @@ def mysql_settings() -> MysqlSettings:
     return MysqlSettings()
 
 
+def mysql_output_rows(sql: str) -> List[Dict[str, str]]:
+    settings = mysql_settings()
+    return parse_mysql_rows(
+        run_mysql(
+            Path(settings.mysql_exe),
+            settings.host,
+            settings.port,
+            settings.user,
+            settings.password,
+            sql,
+            settings.database,
+        )
+    )
+
+
 def config() -> Dict[str, Any]:
     if not CONFIG_PATH.exists():
         raise HTTPException(status_code=500, detail=f"配置文件不存在: {CONFIG_PATH}")
@@ -80,32 +102,91 @@ def config() -> Dict[str, Any]:
 
 
 def query_time_range(dataset_name: str = "sample_raw_points") -> Dict[str, Optional[str]]:
-    settings = mysql_settings()
     sql = f"""
 SELECT
   DATE_FORMAT(MIN(sample_time), '%Y-%m-%dT%H:%i') AS min_time,
   DATE_FORMAT(MAX(sample_time), '%Y-%m-%dT%H:%i') AS max_time,
   COUNT(DISTINCT sample_time) AS time_count
-FROM pump_raw_point_values
-WHERE dataset_name = {sql_quote(dataset_name)};
+FROM (
+  SELECT sample_time FROM pump_header_controller_values WHERE dataset_name = {sql_quote(dataset_name)}
+  UNION
+  SELECT sample_time FROM pump_chiller_values WHERE dataset_name = {sql_quote(dataset_name)}
+  UNION
+  SELECT sample_time FROM pump_device_values WHERE dataset_name = {sql_quote(dataset_name)}
+) AS all_times;
 """
-    output = run_mysql(
-        Path(settings.mysql_exe),
-        settings.host,
-        settings.port,
-        settings.user,
-        settings.password,
-        sql,
-        settings.database,
-    )
-    lines = [line for line in output.splitlines() if line.strip()]
-    if len(lines) < 2:
+    rows = mysql_output_rows(sql)
+    if not rows:
         return {"min_time": None, "max_time": None, "time_count": 0}
-    parts = lines[-1].split("\t")
+    row = rows[0]
     return {
-        "min_time": None if parts[0] == "NULL" else parts[0],
-        "max_time": None if parts[1] == "NULL" else parts[1],
-        "time_count": int(parts[2]) if len(parts) > 2 and parts[2] != "NULL" else 0,
+        "min_time": None if row["min_time"] == "NULL" else row["min_time"],
+        "max_time": None if row["max_time"] == "NULL" else row["max_time"],
+        "time_count": int(row["time_count"]) if row.get("time_count") not in {None, "NULL"} else 0,
+    }
+
+
+def query_device_options(dataset_name: str = "sample_raw_points") -> Dict[str, Any]:
+    source_sql = f"""
+SELECT 'header_controller' AS source_type, group_id, controller_id AS device_id, COUNT(*) AS row_count
+FROM pump_header_controller_values
+WHERE dataset_name = {sql_quote(dataset_name)}
+GROUP BY source_type, group_id, device_id
+UNION ALL
+SELECT 'chiller' AS source_type, group_id, chiller_id AS device_id, COUNT(*) AS row_count
+FROM pump_chiller_values
+WHERE dataset_name = {sql_quote(dataset_name)}
+GROUP BY source_type, group_id, device_id
+ORDER BY source_type, group_id, device_id;
+"""
+    pump_sql = f"""
+SELECT group_id, pump_id, COUNT(*) AS row_count
+FROM pump_device_values
+WHERE dataset_name = {sql_quote(dataset_name)}
+GROUP BY group_id, pump_id
+ORDER BY group_id, pump_id;
+"""
+    source_rows = mysql_output_rows(source_sql)
+    pump_rows = mysql_output_rows(pump_sql)
+
+    source_labels = {
+        "header_controller": "干管协调控制器",
+        "chiller": "冷机",
+    }
+    sources: Dict[str, Dict[str, Any]] = {}
+    for row in source_rows:
+        source_type = row["source_type"]
+        sources.setdefault(
+            source_type,
+            {
+                "value": source_type,
+                "label": source_labels.get(source_type, source_type),
+                "devices": [],
+            },
+        )
+        sources[source_type]["devices"].append(
+            {
+                "id": row["device_id"],
+                "name": row["device_id"],
+                "group_id": row["group_id"],
+                "row_count": int(row["row_count"]),
+            }
+        )
+
+    groups = sorted({row["group_id"] for row in source_rows + pump_rows})
+    pumps = [
+        {
+            "id": row["pump_id"],
+            "name": row["pump_id"],
+            "group_id": row["group_id"],
+            "row_count": int(row["row_count"]),
+        }
+        for row in pump_rows
+    ]
+    return {
+        "sources": list(sources.values()),
+        "groups": [{"id": group_id, "name": group_id} for group_id in groups],
+        "pumps": pumps,
     }
 
 
@@ -187,9 +268,111 @@ def line_points(x_values: np.ndarray, y_values: np.ndarray) -> List[List[float]]
     return points
 
 
+def parse_mysql_rows(output: str) -> List[Dict[str, str]]:
+    lines = [line for line in output.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return []
+    headers = lines[0].split("\t")
+    rows: List[Dict[str, str]] = []
+    for line in lines[1:]:
+        values = line.split("\t")
+        rows.append({header: values[index] if index < len(values) else "" for index, header in enumerate(headers)})
+    return rows
+
+
+def row_float(row: Dict[str, str], key: str) -> Optional[float]:
+    value = row.get(key)
+    if value in {None, "", "NULL"}:
+        return None
+    return finite_float(value)
+
+
+def query_theory_curves(pump_id: str, side: Optional[str], group_id: Optional[str]) -> Dict[str, List[Dict[str, Any]]]:
+    settings = mysql_settings()
+    group_filter = "1 = 1"
+    if group_id:
+        group_filter = f"(s.group_id IS NULL OR s.group_id = {sql_quote(group_id)})"
+    sql = f"""
+SELECT
+  s.id AS curve_set_id,
+  s.curve_name,
+  s.source_type,
+  s.speed_ratio,
+  s.is_normalized,
+  p.point_index,
+  p.q,
+  p.h,
+  p.eta,
+  p.w,
+  p.q_eq,
+  p.h_eq
+FROM pump_theory_curve_sets AS s
+JOIN pump_theory_curve_points AS p ON p.curve_set_id = s.id
+WHERE s.active = 1
+  AND s.pump_id = {sql_quote(pump_id)}
+  AND s.side = {sql_quote(side or "unknown")}
+  AND {group_filter}
+ORDER BY s.id, p.point_index;
+"""
+    try:
+        rows = parse_mysql_rows(
+            run_mysql(
+                Path(settings.mysql_exe),
+                settings.host,
+                settings.port,
+                settings.user,
+                settings.password,
+                sql,
+                settings.database,
+            )
+        )
+    except RuntimeError:
+        return {"head": [], "efficiency": []}
+
+    grouped: Dict[str, List[Dict[str, str]]] = {}
+    for row in rows:
+        grouped.setdefault(row["curve_set_id"], []).append(row)
+
+    head_lines: List[Dict[str, Any]] = []
+    efficiency_lines: List[Dict[str, Any]] = []
+    for curve_rows in grouped.values():
+        first = curve_rows[0]
+        curve_name = first.get("curve_name") or "理论曲线"
+        head_points = []
+        efficiency_points = []
+        for row in curve_rows:
+            q_eq = row_float(row, "q_eq")
+            h_eq = row_float(row, "h_eq")
+            eta = row_float(row, "eta")
+            if q_eq is None:
+                continue
+            if h_eq is not None:
+                head_points.append([q_eq, h_eq])
+            if eta is not None:
+                efficiency_points.append([q_eq, eta])
+        if head_points:
+            head_lines.append(
+                {
+                    "name": f"{curve_name}扬程",
+                    "points": head_points,
+                    "line_type": "dashed",
+                }
+            )
+        if efficiency_points:
+            efficiency_lines.append(
+                {
+                    "name": f"{curve_name}能效",
+                    "points": efficiency_points,
+                    "line_type": "dashed",
+                }
+            )
+    return {"head": head_lines, "efficiency": efficiency_lines}
+
+
 def build_chart_data(result, samples) -> Dict[str, Any]:
     q_eq_grid = np.linspace(float(samples["Q_eq"].min()), float(samples["Q_eq"].max()), 120)
     w_curves = representative_speed_ratios(samples["w"])
+    theory_lines = query_theory_curves(result.pump_id, result.side, result.group_id)
 
     a = result.head_coefficients["a"]
     b = result.head_coefficients["b"]
@@ -248,10 +431,10 @@ def build_chart_data(result, samples) -> Dict[str, Any]:
             "scatter": scatter_points(samples, "Q_eq", "H_eq"),
             "lines": [
                 {
-                    "name": "normalized fit",
+                    "name": "实际能效",
                     "points": line_points(q_eq_grid, predict_quadratic([a, b, c], q_eq_grid)),
                 }
-            ],
+            ] + theory_lines["head"],
         },
         "efficiency_normalized_curve": {
             "title": "归一化 eta-Q 曲线",
@@ -261,10 +444,10 @@ def build_chart_data(result, samples) -> Dict[str, Any]:
             "scatter": scatter_points(samples, "Q_eq", "eta"),
             "lines": [
                 {
-                    "name": "normalized fit",
+                    "name": "实际能效",
                     "points": line_points(q_eq_grid, predict_quadratic([j, k, l], q_eq_grid)),
                 }
-            ],
+            ] + theory_lines["efficiency"],
         },
     }
 
@@ -276,61 +459,27 @@ def health() -> Dict[str, Any]:
 
 @app.get("/api/options")
 def options(dataset_name: str = "sample_raw_points") -> Dict[str, Any]:
-    cfg = config()
-    groups = []
-    for group in cfg.get("pump_groups", []):
-        groups.append(
-            {
-                "id": group.get("id"),
-                "name": group.get("name"),
-                "side": group.get("side"),
-                "description": group.get("description"),
-                "facilities": [
-                    {
-                        "id": facility.get("id"),
-                        "name": facility.get("name"),
-                        "status_point": facility.get("status"),
-                        "flow_point": facility.get("flow"),
-                    }
-                    for facility in group.get("facilities", [])
-                ],
-                "pumps": [
-                    {
-                        "id": pump.get("id"),
-                        "name": pump.get("name"),
-                        "status_point": pump.get("status"),
-                        "frequency_point": pump.get("frequency"),
-                        "power_point": pump.get("power"),
-                        "head_point": pump.get("head"),
-                    }
-                    for pump in group.get("pumps", [])
-                ],
-                "flow_source": group.get("flow_source"),
-                "allocation": group.get("allocation"),
-            }
-        )
+    device_options = query_device_options(dataset_name)
     return {
         "dataset_name": dataset_name,
         "time_range": query_time_range(dataset_name),
-        "groups": groups,
+        **device_options,
     }
 
 
 @app.post("/api/regression")
 def regression(request: RegressionRequest) -> Dict[str, Any]:
-    if request.side not in {"chilled_water", "cooling_water"}:
-        raise HTTPException(status_code=400, detail="side 只能是 chilled_water 或 cooling_water")
-    if not request.facility_ids:
-        raise HTTPException(status_code=400, detail="请至少选择一个冷机/冷却设备")
     if not request.pump_ids:
         raise HTTPException(status_code=400, detail="请至少选择一个水泵")
+    if not request.source_types:
+        raise HTTPException(status_code=400, detail="请至少选择一种流量来源")
 
     cfg = config()
-    groups = side_groups(cfg, request.side)
-    selected_group_config = filtered_config_for_request(cfg, request)
 
     settings = mysql_settings()
-    raw = read_raw_points_from_db(
+    start_time = normalize_datetime(request.start_time)
+    end_time = normalize_datetime(request.end_time)
+    controller_rows = read_controller_rows_from_db(
         Path(settings.mysql_exe),
         settings.host,
         settings.port,
@@ -338,11 +487,42 @@ def regression(request: RegressionRequest) -> Dict[str, Any]:
         settings.password,
         settings.database,
         request.dataset_name,
-        normalize_datetime(request.start_time),
-        normalize_datetime(request.end_time),
+        start_time,
+        end_time,
     )
-    apply_ui_status_selection(raw, groups, request.facility_ids, request.pump_ids)
-    samples, rejects = build_samples(selected_group_config, raw)
+    chiller_rows = read_chiller_rows_from_db(
+        Path(settings.mysql_exe),
+        settings.host,
+        settings.port,
+        settings.user,
+        settings.password,
+        settings.database,
+        request.dataset_name,
+        start_time,
+        end_time,
+    )
+    pump_rows = read_pump_rows_from_db(
+        Path(settings.mysql_exe),
+        settings.host,
+        settings.port,
+        settings.user,
+        settings.password,
+        settings.database,
+        request.dataset_name,
+        start_time,
+        end_time,
+    )
+    flow_device_ids = request.flow_device_ids or request.facility_ids
+    samples, rejects = build_grouped_device_samples(
+        cfg,
+        controller_rows,
+        chiller_rows,
+        pump_rows,
+        source_types=request.source_types,
+        group_ids=request.group_ids,
+        pump_ids=request.pump_ids,
+        flow_device_ids=flow_device_ids,
+    )
     if samples.empty:
         raise HTTPException(status_code=400, detail="当前条件下没有可用于回归的有效样本")
 
@@ -381,7 +561,13 @@ def regression(request: RegressionRequest) -> Dict[str, Any]:
 
     return {
         "request": request.dict(),
-        "raw_time_count": int(len(raw)),
+        "raw_time_count": int(
+            len(
+                set(controller_rows.get("sample_time", []))
+                | set(chiller_rows.get("sample_time", []))
+                | set(pump_rows.get("sample_time", []))
+            )
+        ),
         "valid_sample_count": int(len(samples)),
         "reject_count": int(len(rejects)),
         "sample_counts": samples.groupby("pump_id").size().to_dict(),
