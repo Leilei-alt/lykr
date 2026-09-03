@@ -21,6 +21,26 @@ CREATE TABLE IF NOT EXISTS pump_model_variables (
   KEY idx_pump_model_variables_group (group_id, side)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS pump_point_index (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  device_type VARCHAR(64) NOT NULL COMMENT 'Device type, such as pump/header_controller/chiller',
+  point_name VARCHAR(191) NOT NULL COMMENT 'Point variable name, such as 0x00000200',
+  point_role VARCHAR(64) NOT NULL COMMENT 'Business role, such as pump_status',
+  target_table VARCHAR(128) NOT NULL COMMENT 'Business table that stores the value',
+  target_column VARCHAR(128) NOT NULL COMMENT 'Column in target_table that stores the value',
+  unit VARCHAR(32) NULL,
+  data_type VARCHAR(32) NOT NULL DEFAULT 'DOUBLE',
+  description VARCHAR(512) NULL,
+  active TINYINT NOT NULL DEFAULT 1,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_pump_point_index_device_point (device_type, point_name),
+  KEY idx_pump_point_index_role (point_role),
+  KEY idx_pump_point_index_target (target_table, target_column),
+  KEY idx_pump_point_index_active (active)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS pump_raw_point_values (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   dataset_name VARCHAR(128) NOT NULL,
@@ -41,7 +61,7 @@ CREATE TABLE IF NOT EXISTS pump_header_controller_values (
   sample_time DATETIME NOT NULL,
   group_id VARCHAR(128) NOT NULL COMMENT 'Unique group number shared by controllers and pumps',
   controller_id VARCHAR(128) NOT NULL,
-  flow_point_name VARCHAR(191) NOT NULL DEFAULT '0x0000024C',
+  flow_point_name VARCHAR(191) NOT NULL DEFAULT '0x0000024A',
   flow_value DOUBLE NOT NULL COMMENT 'Header controller flow Q, m3/h',
   status TINYINT NOT NULL DEFAULT 1,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -57,7 +77,6 @@ CREATE TABLE IF NOT EXISTS pump_chiller_values (
   sample_time DATETIME NOT NULL,
   group_id VARCHAR(128) NOT NULL COMMENT 'Unique group number shared by chillers and pumps',
   chiller_id VARCHAR(128) NOT NULL,
-  flow_point_name VARCHAR(191) NOT NULL DEFAULT '0x0000021E',
   flow_value DOUBLE NOT NULL COMMENT 'Chiller flow Q, m3/h',
   status TINYINT NOT NULL DEFAULT 1,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -176,7 +195,7 @@ CREATE TABLE IF NOT EXISTS pump_theory_curve_sets (
   curve_name VARCHAR(128) NOT NULL COMMENT 'Theory curve display name',
   pump_id VARCHAR(128) NOT NULL,
   group_id VARCHAR(128) NULL,
-  side ENUM('chilled_water', 'cooling_water', 'unknown') NOT NULL DEFAULT 'unknown',
+  side VARCHAR(128) NOT NULL DEFAULT 'unknown',
   source_type VARCHAR(128) NULL COMMENT 'Manufacturer, design, manual input, etc.',
   speed_ratio DOUBLE NOT NULL DEFAULT 1.0 COMMENT 'w for the source theory curve',
   is_normalized TINYINT(1) NOT NULL DEFAULT 1,

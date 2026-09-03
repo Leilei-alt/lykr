@@ -223,6 +223,77 @@ def infer_groups_and_sources_for_pumps(
     return {"group_ids": group_ids, "source_types": source_types}
 
 
+def source_label(source_type: str) -> str:
+    labels = {
+        "header_controller": "干管协调控制器",
+        "chiller": "冷机",
+    }
+    return labels.get(source_type, source_type)
+
+
+def group_display_name(group_id: str, source_type: str) -> str:
+    suffix = str(group_id).rsplit("_", 1)[-1]
+    number_labels = {
+        "1": "一组",
+        "2": "二组",
+        "3": "三组",
+    }
+    return f"{source_label(source_type)}{number_labels.get(suffix, suffix)}"
+
+
+def source_groups(controller_rows, chiller_rows) -> Dict[str, str]:
+    groups: Dict[str, str] = {}
+    if not controller_rows.empty:
+        for group_id in controller_rows["group_id"].dropna().astype(str).unique().tolist():
+            groups[group_id] = "header_controller"
+    if not chiller_rows.empty:
+        for group_id in chiller_rows["group_id"].dropna().astype(str).unique().tolist():
+            groups[group_id] = "chiller"
+    return groups
+
+
+def build_group_payload(
+    pump_rows,
+    samples,
+    results: List[Dict[str, Any]],
+    skipped: List[Dict[str, Any]],
+    group_sources: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    result_by_pump = {item["pump_id"]: item for item in results}
+    skipped_by_pump = {item["pump_id"]: item for item in skipped}
+    sample_counts = samples.groupby("pump_id").size().to_dict() if not samples.empty else {}
+    groups: Dict[str, Dict[str, Any]] = {}
+    for _, row in pump_rows.drop_duplicates(subset=["group_id", "pump_id"]).iterrows():
+        group_id = str(row["group_id"])
+        if group_id not in group_sources:
+            continue
+        pump_id = str(row["pump_id"])
+        source_type = group_sources[group_id]
+        groups.setdefault(
+            group_id,
+            {
+                "id": group_id,
+                "name": group_display_name(group_id, source_type),
+                "source_type": source_type,
+                "source_label": source_label(source_type),
+                "pumps": [],
+            },
+        )
+        groups[group_id]["pumps"].append(
+            {
+                "id": pump_id,
+                "name": pump_id,
+                "sample_count": int(sample_counts.get(pump_id, 0)),
+                "has_result": pump_id in result_by_pump,
+                "skipped_reason": skipped_by_pump.get(pump_id, {}).get("reason"),
+            }
+        )
+
+    for group in groups.values():
+        group["pumps"] = sorted(group["pumps"], key=lambda item: item["id"])
+    return sorted(groups.values(), key=lambda item: (item["source_type"], item["id"]))
+
+
 def normalize_datetime(value: str) -> str:
     try:
         return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M:%S")
@@ -502,9 +573,6 @@ def options(dataset_name: str = "sample_raw_points") -> Dict[str, Any]:
 
 @app.post("/api/regression")
 def regression(request: RegressionRequest) -> Dict[str, Any]:
-    if not request.pump_ids:
-        raise HTTPException(status_code=400, detail="请至少选择一个水泵")
-
     cfg = config()
 
     settings = mysql_settings()
@@ -543,27 +611,46 @@ def regression(request: RegressionRequest) -> Dict[str, Any]:
         start_time,
         end_time,
     )
-    inferred = infer_groups_and_sources_for_pumps(request.pump_ids, controller_rows, chiller_rows, pump_rows)
+    group_sources = source_groups(controller_rows, chiller_rows)
+    if not group_sources:
+        raise HTTPException(status_code=400, detail="当前时间段内没有干管协调控制器或冷机流量数据")
+
+    if request.pump_ids:
+        inferred = infer_groups_and_sources_for_pumps(request.pump_ids, controller_rows, chiller_rows, pump_rows)
+        source_types = inferred["source_types"]
+        group_ids = inferred["group_ids"]
+        selected_pump_ids: Optional[List[str]] = request.pump_ids
+    else:
+        source_types = sorted(set(group_sources.values()))
+        group_ids = sorted(group_sources.keys())
+        selected_pump_ids = None
+
     samples, rejects = build_grouped_device_samples(
         cfg,
         controller_rows,
         chiller_rows,
         pump_rows,
-        source_types=inferred["source_types"],
-        group_ids=inferred["group_ids"],
-        pump_ids=request.pump_ids,
+        source_types=source_types,
+        group_ids=group_ids,
+        pump_ids=selected_pump_ids,
         flow_device_ids=None,
     )
     if samples.empty:
         raise HTTPException(status_code=400, detail="当前条件下没有可用于回归的有效样本")
 
-    samples = samples[samples["pump_id"].astype(str).isin(request.pump_ids)].copy()
-    if samples.empty:
-        raise HTTPException(status_code=400, detail="选中的水泵没有有效样本")
+    candidate_pumps = pump_rows[
+        pump_rows["group_id"].astype(str).isin(group_ids)
+        & (pump_rows["status"].fillna(0) > 0)
+    ]["pump_id"].dropna().astype(str).unique().tolist()
+    if selected_pump_ids:
+        candidate_pumps = [pump_id for pump_id in selected_pump_ids if pump_id in set(candidate_pumps)]
+        samples = samples[samples["pump_id"].astype(str).isin(candidate_pumps)].copy()
+        if samples.empty:
+            raise HTTPException(status_code=400, detail="选中的水泵没有有效样本")
 
     results = []
     skipped = []
-    for pump_id in request.pump_ids:
+    for pump_id in sorted(candidate_pumps):
         pump_samples = samples[samples["pump_id"].astype(str) == str(pump_id)]
         if len(pump_samples) < request.min_samples:
             skipped.append({"pump_id": pump_id, "reason": f"only {len(pump_samples)} valid samples"})
@@ -588,12 +675,30 @@ def regression(request: RegressionRequest) -> Dict[str, Any]:
         )
 
     if not results:
-        raise HTTPException(status_code=400, detail="有效样本数量不足，无法完成回归")
+        return {
+            "request": request.dict(),
+            "inferred_group_ids": group_ids,
+            "inferred_source_types": source_types,
+            "groups": build_group_payload(pump_rows, samples, results, skipped, group_sources),
+            "raw_time_count": int(
+                len(
+                    set(controller_rows.get("sample_time", []))
+                    | set(chiller_rows.get("sample_time", []))
+                    | set(pump_rows.get("sample_time", []))
+                )
+            ),
+            "valid_sample_count": int(len(samples)),
+            "reject_count": int(len(rejects)),
+            "sample_counts": samples.groupby("pump_id").size().to_dict(),
+            "results": [],
+            "skipped": skipped,
+        }
 
     return {
         "request": request.dict(),
-        "inferred_group_ids": inferred["group_ids"],
-        "inferred_source_types": inferred["source_types"],
+        "inferred_group_ids": group_ids,
+        "inferred_source_types": source_types,
+        "groups": build_group_payload(pump_rows, samples, results, skipped, group_sources),
         "raw_time_count": int(
             len(
                 set(controller_rows.get("sample_time", []))

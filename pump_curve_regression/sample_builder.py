@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -29,6 +30,26 @@ import pandas as pd
 
 DEFAULT_EFFICIENCY_FACTOR = 0.00275
 DEFAULT_SPEED_RATIO_TOLERANCE = 0.02
+HEADER_CONTROLLER_FLOW_POINT_NAME = "0x0000024A"
+SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def demo_pair_statuses(index: int, group_no: int, period_index: int = 0) -> Tuple[int, int]:
+    selector = (index + group_no + period_index) % 16
+    if selector in {0, 7}:
+        return 1, 0
+    if selector == 11:
+        return 0, 1
+    return 1, 1
+
+
+def demo_controller_status(index: int, group_no: int, offset: int, period_index: int = 0) -> int:
+    selector = (index + group_no + period_index) % 10
+    if offset == 0 and selector == 6:
+        return 0
+    if offset == 1 and selector in {0, 5}:
+        return 0
+    return 1
 
 
 @dataclass
@@ -105,6 +126,70 @@ def run_mysql(
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or proc.stdout.strip())
     return proc.stdout
+
+
+def parse_mysql_table(output: str) -> List[Dict[str, str]]:
+    lines = [line for line in output.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return []
+    headers = lines[0].split("\t")
+    rows = []
+    for line in lines[1:]:
+        values = line.split("\t")
+        rows.append({header: values[index] if index < len(values) else "" for index, header in enumerate(headers)})
+    return rows
+
+
+def quote_identifier(identifier: str) -> str:
+    text = str(identifier or "")
+    if not SQL_IDENTIFIER_RE.match(text):
+        raise ValueError(f"Unsafe SQL identifier from pump_point_index: {text!r}")
+    return f"`{text}`"
+
+
+def read_point_index(
+    mysql_exe: Path,
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    database: str,
+    device_type: str,
+    point_roles: List[str],
+) -> Dict[str, Dict[str, str]]:
+    role_list = ", ".join(sql_quote(role) for role in point_roles)
+    sql = f"""
+SELECT
+  device_type,
+  point_name,
+  point_role,
+  target_table,
+  target_column,
+  unit,
+  data_type
+FROM pump_point_index
+WHERE active = 1
+  AND device_type = {sql_quote(device_type)}
+  AND point_role IN ({role_list})
+ORDER BY point_role;
+"""
+    rows = parse_mysql_table(run_mysql(mysql_exe, host, port, user, password, sql, database))
+    index = {row["point_role"]: row for row in rows}
+    missing = [role for role in point_roles if role not in index]
+    if missing:
+        raise RuntimeError(f"Missing active point index for {device_type}: {', '.join(missing)}")
+    return index
+
+
+def indexed_target_table(index: Dict[str, Dict[str, str]], roles: List[str]) -> str:
+    tables = {index[role]["target_table"] for role in roles}
+    if len(tables) != 1:
+        raise RuntimeError(f"Point index roles must use one target table, got: {', '.join(sorted(tables))}")
+    return quote_identifier(next(iter(tables)))
+
+
+def indexed_column(index: Dict[str, Dict[str, str]], role: str) -> str:
+    return quote_identifier(index[role]["target_column"])
 
 
 def detect_timestamp_column(df: pd.DataFrame, configured: Optional[str] = None) -> Optional[str]:
@@ -389,11 +474,26 @@ def read_controller_rows_from_db(
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
 ) -> pd.DataFrame:
+    point_index = read_point_index(
+        mysql_exe,
+        host,
+        port,
+        user,
+        password,
+        database,
+        "header_controller",
+        ["header_controller_flow", "header_controller_status"],
+    )
+    target_table = indexed_target_table(point_index, ["header_controller_flow", "header_controller_status"])
+    flow_column = indexed_column(point_index, "header_controller_flow")
+    status_column = indexed_column(point_index, "header_controller_status")
+    flow_point_name = point_index["header_controller_flow"]["point_name"]
     conditions = [f"dataset_name = {sql_quote(dataset_name)}"]
     if start_time:
         conditions.append(f"sample_time >= {sql_quote(start_time)}")
     if end_time:
         conditions.append(f"sample_time <= {sql_quote(end_time)}")
+    conditions.append(f"flow_point_name = {sql_quote(flow_point_name)}")
     sql = f"""
 SELECT
   dataset_name,
@@ -401,9 +501,9 @@ SELECT
   group_id,
   controller_id,
   flow_point_name,
-  flow_value,
-  status
-FROM pump_header_controller_values
+  {flow_column} AS flow_value,
+  {status_column} AS status
+FROM {target_table}
 WHERE {" AND ".join(conditions)}
 ORDER BY sample_time, group_id, controller_id;
 """
@@ -440,6 +540,20 @@ def read_chiller_rows_from_db(
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
 ) -> pd.DataFrame:
+    point_index = read_point_index(
+        mysql_exe,
+        host,
+        port,
+        user,
+        password,
+        database,
+        "chiller",
+        ["chiller_flow", "chiller_status"],
+    )
+    target_table = indexed_target_table(point_index, ["chiller_flow", "chiller_status"])
+    flow_column = indexed_column(point_index, "chiller_flow")
+    status_column = indexed_column(point_index, "chiller_status")
+    flow_point_name = point_index["chiller_flow"]["point_name"]
     conditions = [f"dataset_name = {sql_quote(dataset_name)}"]
     if start_time:
         conditions.append(f"sample_time >= {sql_quote(start_time)}")
@@ -451,10 +565,10 @@ SELECT
   sample_time,
   group_id,
   chiller_id,
-  flow_point_name,
-  flow_value,
-  status
-FROM pump_chiller_values
+  {sql_quote(flow_point_name)} AS flow_point_name,
+  {flow_column} AS flow_value,
+  {status_column} AS status
+FROM {target_table}
 WHERE {" AND ".join(conditions)}
 ORDER BY sample_time, group_id, chiller_id;
 """
@@ -491,6 +605,21 @@ def read_pump_rows_from_db(
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
 ) -> pd.DataFrame:
+    point_index = read_point_index(
+        mysql_exe,
+        host,
+        port,
+        user,
+        password,
+        database,
+        "pump",
+        ["pump_status", "pump_speed_ratio", "pump_head", "pump_power"],
+    )
+    target_table = indexed_target_table(point_index, ["pump_status", "pump_speed_ratio", "pump_head", "pump_power"])
+    status_column = indexed_column(point_index, "pump_status")
+    speed_ratio_column = indexed_column(point_index, "pump_speed_ratio")
+    head_column = indexed_column(point_index, "pump_head")
+    power_column = indexed_column(point_index, "pump_power")
     conditions = [f"dataset_name = {sql_quote(dataset_name)}"]
     if start_time:
         conditions.append(f"sample_time >= {sql_quote(start_time)}")
@@ -502,11 +631,11 @@ SELECT
   sample_time,
   group_id,
   pump_id,
-  status,
-  speed_ratio,
-  head,
-  power_kw
-FROM pump_device_values
+  {status_column} AS status,
+  {speed_ratio_column} AS speed_ratio,
+  {head_column} AS head,
+  {power_column} AS power_kw
+FROM {target_table}
 WHERE {" AND ".join(conditions)}
 ORDER BY sample_time, group_id, pump_id;
 """
@@ -939,6 +1068,7 @@ def generate_demo_separated_device_rows(sample_count: int = 50) -> Tuple[pd.Data
             pump_start = (group_no - 1) * 2 + 1
             w_base = min(0.98, 0.70 + 0.23 * phase + 0.018 * (group_no - 1) + 0.006 * math.sin(i * 0.18 + group_no))
             speed_delta = 0.026 if (i + group_no) % 19 == 0 else 0.006
+            pump_statuses = demo_pair_statuses(i, group_no)
 
             for offset, ratio in enumerate([controller_split, 1 - controller_split]):
                 controller_rows.append(
@@ -946,9 +1076,9 @@ def generate_demo_separated_device_rows(sample_count: int = 50) -> Tuple[pd.Data
                         "sample_time": sample_time,
                         "group_id": header_group,
                         "controller_id": f"HCC{controller_start + offset}",
-                        "flow_point_name": "0x0000024C",
+                        "flow_point_name": HEADER_CONTROLLER_FLOW_POINT_NAME,
                         "flow_value": round(header_total * ratio, 3),
-                        "status": 1,
+                        "status": demo_controller_status(i, group_no, offset),
                     }
                 )
 
@@ -959,7 +1089,7 @@ def generate_demo_separated_device_rows(sample_count: int = 50) -> Tuple[pd.Data
                         "sample_time": sample_time,
                         "group_id": header_group,
                         "pump_id": f"CHWP{pump_index}",
-                        "status": 1,
+                        "status": pump_statuses[offset],
                         "speed_ratio": round(w_base + (-0.5 + offset) * speed_delta, 4),
                         "head": round(30 + 15 * phase + 1.4 * (group_no - 1) + 0.7 * math.sin(i * 0.21 + offset), 3),
                         "power_kw": round(34 + 43 * phase + 3.5 * (group_no - 1) + 1.1 * math.cos(i * 0.19 + offset), 3),
@@ -972,6 +1102,7 @@ def generate_demo_separated_device_rows(sample_count: int = 50) -> Tuple[pd.Data
             pump_start = (group_no - 1) * 2 + 1
             w_base = min(0.98, 0.71 + 0.22 * phase + 0.016 * (group_no - 1) + 0.006 * math.cos(i * 0.16 + group_no))
             speed_delta = 0.028 if (i + group_no) % 23 == 0 else 0.007
+            pump_statuses = demo_pair_statuses(i, group_no)
 
             for offset in range(3):
                 chiller_index = chiller_start + offset
@@ -982,7 +1113,6 @@ def generate_demo_separated_device_rows(sample_count: int = 50) -> Tuple[pd.Data
                         "sample_time": sample_time,
                         "group_id": chiller_group,
                         "chiller_id": f"CH{chiller_index}",
-                        "flow_point_name": "0x0000021E",
                         "flow_value": round(base_flow + 9 * math.sin(i * 0.31 + offset + group_no), 3),
                         "status": status,
                     }
@@ -995,7 +1125,7 @@ def generate_demo_separated_device_rows(sample_count: int = 50) -> Tuple[pd.Data
                         "sample_time": sample_time,
                         "group_id": chiller_group,
                         "pump_id": f"CWP{pump_index}",
-                        "status": 1,
+                        "status": pump_statuses[offset],
                         "speed_ratio": round(w_base + (-0.5 + offset) * speed_delta, 4),
                         "head": round(25 + 12.5 * phase + 1.2 * (group_no - 1) + 0.6 * math.cos(i * 0.22 + offset), 3),
                         "power_kw": round(33 + 41 * phase + 3.2 * (group_no - 1) + 1.0 * math.sin(i * 0.2 + offset), 3),
@@ -1054,7 +1184,7 @@ ON DUPLICATE KEY UPDATE
         chiller_values.append(
             "("
             f"{sql_quote(dataset_name)}, {sql_quote(row['sample_time'])}, {sql_quote(row['group_id'])}, "
-            f"{sql_quote(row['chiller_id'])}, {sql_quote(row['flow_point_name'])}, "
+            f"{sql_quote(row['chiller_id'])}, "
             f"{repr(float(row['flow_value']))}, {int(row['status'])}"
             ")"
         )
@@ -1062,14 +1192,13 @@ ON DUPLICATE KEY UPDATE
         statements.append(
             """
 INSERT INTO pump_chiller_values
-  (dataset_name, sample_time, group_id, chiller_id, flow_point_name, flow_value, status)
+  (dataset_name, sample_time, group_id, chiller_id, flow_value, status)
 VALUES
 """
             + ",\n".join(chiller_values)
             + """
 ON DUPLICATE KEY UPDATE
   group_id = VALUES(group_id),
-  flow_point_name = VALUES(flow_point_name),
   flow_value = VALUES(flow_value),
   status = VALUES(status);
 """

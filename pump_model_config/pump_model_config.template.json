@@ -24,13 +24,14 @@
   "separated_device_tables": {
     "header_controller": {
       "table": "pump_header_controller_values",
-      "flow_point_name": "0x0000024C",
+      "status_point_name": "0x00000200",
+      "flow_point_name": "0x0000024A",
       "group_key": "group_id",
       "formula": "Q_total = sum(flow_value of all running header controllers with the same sample_time and group_id)"
     },
     "chiller": {
       "table": "pump_chiller_values",
-      "flow_point_name": "0x0000021E",
+      "status_point_name": "0x00000200",
       "group_key": "group_id",
       "formula": "Q_total = sum(flow_value of all running chillers with the same sample_time and group_id)"
     },
