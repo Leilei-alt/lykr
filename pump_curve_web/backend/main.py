@@ -53,7 +53,7 @@ class RegressionRequest(BaseModel):
     start_time: str
     end_time: str
     side: str = ""
-    source_types: List[str] = Field(default_factory=lambda: ["header_controller", "chiller"])
+    source_types: List[str] = Field(default_factory=list)
     group_ids: List[str] = Field(default_factory=list)
     flow_device_ids: List[str] = Field(default_factory=list)
     facility_ids: List[str] = Field(default_factory=list)
@@ -174,11 +174,18 @@ ORDER BY group_id, pump_id;
         )
 
     groups = sorted({row["group_id"] for row in source_rows + pump_rows})
+    group_sources: Dict[str, List[str]] = {}
+    for row in source_rows:
+        group_sources.setdefault(row["group_id"], [])
+        if row["source_type"] not in group_sources[row["group_id"]]:
+            group_sources[row["group_id"]].append(row["source_type"])
     pumps = [
         {
             "id": row["pump_id"],
             "name": row["pump_id"],
             "group_id": row["group_id"],
+            "source_types": group_sources.get(row["group_id"], []),
+            "source_label": "、".join(source_labels.get(item, item) for item in group_sources.get(row["group_id"], [])),
             "row_count": int(row["row_count"]),
         }
         for row in pump_rows
@@ -188,6 +195,32 @@ ORDER BY group_id, pump_id;
         "groups": [{"id": group_id, "name": group_id} for group_id in groups],
         "pumps": pumps,
     }
+
+
+def infer_groups_and_sources_for_pumps(
+    selected_pump_ids: List[str],
+    controller_rows,
+    chiller_rows,
+    pump_rows,
+) -> Dict[str, List[str]]:
+    selected = {str(pump_id) for pump_id in selected_pump_ids}
+    selected_pump_rows = pump_rows[pump_rows["pump_id"].astype(str).isin(selected)].copy()
+    if selected_pump_rows.empty:
+        raise HTTPException(status_code=400, detail="选中的水泵在当前时间段内没有数据")
+
+    group_ids = sorted(selected_pump_rows["group_id"].dropna().astype(str).unique().tolist())
+    if not group_ids:
+        raise HTTPException(status_code=400, detail="选中的水泵没有可用组号")
+
+    source_types = []
+    if not controller_rows.empty and controller_rows["group_id"].astype(str).isin(group_ids).any():
+        source_types.append("header_controller")
+    if not chiller_rows.empty and chiller_rows["group_id"].astype(str).isin(group_ids).any():
+        source_types.append("chiller")
+    if not source_types:
+        raise HTTPException(status_code=400, detail="未找到与所选水泵同组的干管协调控制器或冷机流量数据")
+
+    return {"group_ids": group_ids, "source_types": source_types}
 
 
 def normalize_datetime(value: str) -> str:
@@ -471,8 +504,6 @@ def options(dataset_name: str = "sample_raw_points") -> Dict[str, Any]:
 def regression(request: RegressionRequest) -> Dict[str, Any]:
     if not request.pump_ids:
         raise HTTPException(status_code=400, detail="请至少选择一个水泵")
-    if not request.source_types:
-        raise HTTPException(status_code=400, detail="请至少选择一种流量来源")
 
     cfg = config()
 
@@ -512,16 +543,16 @@ def regression(request: RegressionRequest) -> Dict[str, Any]:
         start_time,
         end_time,
     )
-    flow_device_ids = request.flow_device_ids or request.facility_ids
+    inferred = infer_groups_and_sources_for_pumps(request.pump_ids, controller_rows, chiller_rows, pump_rows)
     samples, rejects = build_grouped_device_samples(
         cfg,
         controller_rows,
         chiller_rows,
         pump_rows,
-        source_types=request.source_types,
-        group_ids=request.group_ids,
+        source_types=inferred["source_types"],
+        group_ids=inferred["group_ids"],
         pump_ids=request.pump_ids,
-        flow_device_ids=flow_device_ids,
+        flow_device_ids=None,
     )
     if samples.empty:
         raise HTTPException(status_code=400, detail="当前条件下没有可用于回归的有效样本")
@@ -561,6 +592,8 @@ def regression(request: RegressionRequest) -> Dict[str, Any]:
 
     return {
         "request": request.dict(),
+        "inferred_group_ids": inferred["group_ids"],
+        "inferred_source_types": inferred["source_types"],
         "raw_time_count": int(
             len(
                 set(controller_rows.get("sample_time", []))

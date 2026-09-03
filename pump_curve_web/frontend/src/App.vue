@@ -30,84 +30,67 @@
             <input v-model="form.dataset_name" type="text" @change="loadOptions" />
           </label>
         </div>
-
-        <div v-if="options?.sources?.length" class="side-row">
-          <button
-            v-for="source in options.sources"
-            :key="source.value"
-            type="button"
-            :class="{ active: form.source_types.includes(source.value) }"
-            @click="toggleSource(source.value)"
-          >
-            {{ source.label }}
-          </button>
-        </div>
       </section>
 
-      <section v-if="options" class="selection-layout">
+      <section v-if="options" class="selection-layout pump-picker-layout">
         <div class="selection-panel">
           <div class="panel-heading">
-            <h2>流量来源设备</h2>
-            <button type="button" @click="selectAllFlowDevices">全选</button>
+            <h2>用户选择水泵</h2>
+            <button type="button" @click="selectVisiblePumps">选择当前列表</button>
           </div>
-          <template v-for="source in selectedSources" :key="source.value">
-            <h3 class="source-title">{{ source.label }}</h3>
-            <label v-for="device in source.devices" :key="`${source.value}-${device.id}`" class="check-row">
-              <input v-model="form.flow_device_ids" type="checkbox" :value="device.id" />
+          <label class="select-field">
+            <span>搜索水泵</span>
+            <input v-model.trim="pumpKeyword" type="text" placeholder="输入水泵编号或组号" />
+          </label>
+          <div class="pump-list">
+            <label v-for="pump in filteredPumps" :key="pump.id" class="check-row">
+              <input v-model="form.selected_pump_ids" type="checkbox" :value="pump.id" />
               <span>
-                <strong>{{ device.name || device.id }}</strong>
-                <small>组号 {{ device.group_id }} / {{ device.row_count }} 条</small>
+                <strong>{{ pump.name || pump.id }}</strong>
+                <small>组号 {{ pump.group_id }} / {{ pump.source_label || '未识别来源' }} / {{ pump.row_count }} 条</small>
               </span>
             </label>
-          </template>
+          </div>
         </div>
 
         <div class="selection-panel">
           <div class="panel-heading">
-            <h2>组号</h2>
-            <button type="button" @click="selectAllGroups">全选</button>
+            <h2>绘图水泵</h2>
           </div>
-          <label v-for="group in options.groups" :key="group.id" class="check-row">
-            <input v-model="form.group_ids" type="checkbox" :value="group.id" />
-            <span>
-              <strong>{{ group.name || group.id }}</strong>
-              <small>同组流量来源与水泵会被匹配计算</small>
-            </span>
+          <label class="select-field">
+            <span>从已选水泵中选择</span>
+            <select v-model="form.display_pump_id">
+              <option v-for="pump in selectedCandidatePumps" :key="pump.id" :value="pump.id">
+                {{ pump.name || pump.id }} / {{ pump.group_id }} / {{ pump.source_label || '未识别来源' }}
+              </option>
+            </select>
           </label>
-        </div>
-
-        <div class="selection-panel">
-          <div class="panel-heading">
-            <h2>水泵</h2>
-            <button type="button" @click="selectAllPumps">全选</button>
+          <div v-if="selectedPump" class="selected-pump">
+            <strong>{{ selectedPump.name || selectedPump.id }}</strong>
+            <span>组号 {{ selectedPump.group_id }}</span>
+            <span>流量来源 {{ selectedPump.source_label || '未识别来源' }}</span>
+            <span>数据 {{ selectedPump.row_count }} 条</span>
           </div>
-          <label v-for="pump in filteredPumps" :key="pump.id" class="check-row">
-            <input v-model="form.pump_ids" type="checkbox" :value="pump.id" />
-            <span>
-              <strong>{{ pump.name || pump.id }}</strong>
-              <small>组号 {{ pump.group_id }} / {{ pump.row_count }} 条</small>
-            </span>
-          </label>
         </div>
 
         <aside class="summary-panel">
           <h2>当前条件</h2>
           <dl>
             <div>
+              <dt>当前水泵</dt>
+              <dd>{{ selectedPump?.id || '-' }}</dd>
+            </div>
+            <div>
+              <dt>已选水泵</dt>
+              <dd>{{ form.selected_pump_ids.length }}</dd>
+            </div>
+            <div>
+              <dt>所属组号</dt>
+              <dd>{{ selectedPump?.group_id || '-' }}</dd>
+            </div>
+            <div>
               <dt>流量来源</dt>
-              <dd>{{ sourceSummary }}</dd>
-            </div>
-            <div>
-              <dt>组号数量</dt>
-              <dd>{{ form.group_ids.length }}</dd>
-            </div>
-            <div>
-              <dt>来源设备</dt>
-              <dd>{{ form.flow_device_ids.length }}</dd>
-            </div>
-            <div>
-              <dt>水泵数量</dt>
-              <dd>{{ form.pump_ids.length }}</dd>
+              <dd>{{ selectedSourceSummary }}</dd>
             </div>
             <div>
               <dt>数据库时间点</dt>
@@ -130,6 +113,10 @@
               有效样本 {{ result.valid_sample_count }} 条，
               原始时间点 {{ result.raw_time_count }} 个，
               异常样本 {{ result.reject_count }} 条
+            </p>
+            <p>
+              自动识别组号：{{ result.inferred_group_ids?.join('、') || '-' }}；
+              自动识别来源：{{ formatSourceTypes(result.inferred_source_types) }}
             </p>
           </div>
         </div>
@@ -160,10 +147,14 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import RegressionChart from './components/RegressionChart.vue'
 
 const apiBase = 'http://127.0.0.1:8010'
+const sourceLabels = {
+  header_controller: '干管协调控制器',
+  chiller: '冷机',
+}
 
 const apiOk = ref(false)
 const options = ref(null)
@@ -175,29 +166,40 @@ const form = reactive({
   dataset_name: 'sample_raw_points',
   start_time: '',
   end_time: '',
-  side: '',
-  source_types: [],
-  group_ids: [],
-  flow_device_ids: [],
-  facility_ids: [],
-  pump_ids: [],
+  selected_pump_ids: [],
+  display_pump_id: '',
 })
-
-const selectedSources = computed(() => {
-  return options.value?.sources?.filter((source) => form.source_types.includes(source.value)) || []
-})
+const pumpKeyword = ref('')
 
 const filteredPumps = computed(() => {
-  const groups = new Set(form.group_ids)
   const pumps = options.value?.pumps || []
-  if (!groups.size) return pumps
-  return pumps.filter((pump) => groups.has(pump.group_id))
+  const keyword = pumpKeyword.value.toLowerCase()
+  if (!keyword) return pumps
+  return pumps.filter((pump) => {
+    return [pump.id, pump.name, pump.group_id, pump.source_label]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(keyword))
+  })
 })
 
-const sourceSummary = computed(() => {
-  const labels = selectedSources.value.map((source) => source.label)
-  return labels.length ? labels.join('、') : '-'
+const selectedCandidatePumps = computed(() => {
+  const selected = new Set(form.selected_pump_ids)
+  return options.value?.pumps?.filter((pump) => selected.has(pump.id)) || []
 })
+
+const selectedPump = computed(() => {
+  return selectedCandidatePumps.value.find((pump) => pump.id === form.display_pump_id) || null
+})
+
+const selectedSourceSummary = computed(() => {
+  const sources = (selectedPump.value?.source_types || []).map((source) => sourceLabels[source] || source)
+  return sources.length ? sources.join('、') : '-'
+})
+
+function formatSourceTypes(values) {
+  if (!values?.length) return '-'
+  return values.map((value) => sourceLabels[value] || value).join('、')
+}
 
 function formatNumber(value) {
   const number = Number(value)
@@ -205,37 +207,24 @@ function formatNumber(value) {
   return number.toFixed(3)
 }
 
-function toggleSource(sourceType) {
-  result.value = null
-  if (form.source_types.includes(sourceType)) {
-    form.source_types = form.source_types.filter((item) => item !== sourceType)
-  } else {
-    form.source_types = [...form.source_types, sourceType]
-  }
-  const visibleDeviceIds = new Set(selectedSources.value.flatMap((source) => source.devices.map((item) => item.id)))
-  form.flow_device_ids = form.flow_device_ids.filter((id) => visibleDeviceIds.has(id))
-}
-
 function resetSelections() {
-  form.source_types = options.value?.sources?.map((item) => item.value) || []
-  form.group_ids = options.value?.groups?.map((item) => item.id) || []
-  selectAllFlowDevices()
-  selectAllPumps()
+  form.selected_pump_ids = options.value?.pumps?.map((item) => item.id) || []
+  form.display_pump_id = form.selected_pump_ids[0] || ''
 }
 
-function selectAllFlowDevices() {
-  form.flow_device_ids = selectedSources.value.flatMap((source) => source.devices.map((item) => item.id))
-  form.facility_ids = [...form.flow_device_ids]
+function selectVisiblePumps() {
+  form.selected_pump_ids = filteredPumps.value.map((item) => item.id)
+  form.display_pump_id = form.selected_pump_ids[0] || ''
 }
 
-function selectAllGroups() {
-  form.group_ids = options.value?.groups?.map((item) => item.id) || []
-  selectAllPumps()
-}
-
-function selectAllPumps() {
-  form.pump_ids = filteredPumps.value.map((item) => item.id)
-}
+watch(
+  () => form.selected_pump_ids.slice(),
+  () => {
+    if (!form.selected_pump_ids.includes(form.display_pump_id)) {
+      form.display_pump_id = form.selected_pump_ids[0] || ''
+    }
+  },
+)
 
 async function loadOptions() {
   error.value = ''
@@ -254,12 +243,21 @@ async function runRegression() {
   loading.value = true
   error.value = ''
   result.value = null
-  form.facility_ids = [...form.flow_device_ids]
+  if (!form.display_pump_id) {
+    error.value = '请先选择候选水泵，并在下拉框中选择一个绘图水泵'
+    loading.value = false
+    return
+  }
   try {
     const response = await fetch(`${apiBase}/api/regression`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(form),
+      body: JSON.stringify({
+        dataset_name: form.dataset_name,
+        start_time: form.start_time,
+        end_time: form.end_time,
+        pump_ids: [form.display_pump_id],
+      }),
     })
     const payload = await response.json()
     if (!response.ok) {

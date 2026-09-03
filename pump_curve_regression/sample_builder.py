@@ -585,11 +585,11 @@ def build_grouped_device_samples(
                 (pump_rows["sample_time"].astype(str) == str(sample_time))
                 & (pump_rows["group_id"].astype(str) == str(group_id))
             ].copy()
-            if selected_pumps:
-                group_pumps = group_pumps[group_pumps["pump_id"].astype(str).isin(selected_pumps)]
             group_pumps = group_pumps[group_pumps["status"].fillna(0) > 0]
             if group_pumps.empty:
                 issues.append(BuildIssue(str(sample_time), str(group_id), None, f"{source_type} no running pump in same group"))
+                continue
+            if selected_pumps and not group_pumps["pump_id"].astype(str).isin(selected_pumps).any():
                 continue
 
             w_values = group_pumps["w"].dropna().astype(float)
@@ -611,6 +611,8 @@ def build_grouped_device_samples(
             q_each = q_total / len(group_pumps)
             for _, pump in group_pumps.iterrows():
                 pump_id = str(pump["pump_id"])
+                if selected_pumps and pump_id not in selected_pumps:
+                    continue
                 h = to_float(pump.get("H"))
                 power = to_float(pump.get("power"))
                 w = to_float(pump.get("w"))
@@ -927,93 +929,78 @@ def generate_demo_separated_device_rows(sample_count: int = 50) -> Tuple[pd.Data
 
     for i, row in raw.iterrows():
         sample_time = row["timestamp"]
-        controller_split = 0.52 + 0.025 * math.sin(i * 0.23)
-        header_total = float(row["CHW.total_flow"])
-        header_group = "header_group_1"
-        chiller_group = "chiller_group_1"
+        phase = i / max(sample_count - 1, 1)
 
-        controller_rows.extend(
-            [
-                {
-                    "sample_time": sample_time,
-                    "group_id": header_group,
-                    "controller_id": "HCC1",
-                    "flow_point_name": "0x0000024C",
-                    "flow_value": round(header_total * controller_split, 3),
-                    "status": 1,
-                },
-                {
-                    "sample_time": sample_time,
-                    "group_id": header_group,
-                    "controller_id": "HCC2",
-                    "flow_point_name": "0x0000024C",
-                    "flow_value": round(header_total * (1 - controller_split), 3),
-                    "status": 1,
-                },
-            ]
-        )
+        for group_no in range(1, 4):
+            header_group = f"header_group_{group_no}"
+            header_total = (220 + 420 * phase + 18 * math.sin(i * 0.28 + group_no)) * (1 + 0.08 * (group_no - 1))
+            controller_split = 0.50 + 0.03 * math.sin(i * 0.23 + group_no * 0.7)
+            controller_start = (group_no - 1) * 2 + 1
+            pump_start = (group_no - 1) * 2 + 1
+            w_base = min(0.98, 0.70 + 0.23 * phase + 0.018 * (group_no - 1) + 0.006 * math.sin(i * 0.18 + group_no))
+            speed_delta = 0.026 if (i + group_no) % 19 == 0 else 0.006
 
-        for chiller_id, status_col, flow_col in [
-            ("CH1", "B101-CH.status", "B101-CH.cw_flow"),
-            ("CH2", "B102-CH.status", "B102-CH.cw_flow"),
-            ("CH3", "B103-CH.status", "B103-CH.cw_flow"),
-        ]:
-            chiller_rows.append(
-                {
-                    "sample_time": sample_time,
-                    "group_id": chiller_group,
-                    "chiller_id": chiller_id,
-                    "flow_point_name": "0x0000021E",
-                    "flow_value": float(row[flow_col]),
-                    "status": int(row[status_col]),
-                }
-            )
+            for offset, ratio in enumerate([controller_split, 1 - controller_split]):
+                controller_rows.append(
+                    {
+                        "sample_time": sample_time,
+                        "group_id": header_group,
+                        "controller_id": f"HCC{controller_start + offset}",
+                        "flow_point_name": "0x0000024C",
+                        "flow_value": round(header_total * ratio, 3),
+                        "status": 1,
+                    }
+                )
 
-        header_w_base = (float(row["CHWP1.frequency"]) + float(row["CHWP2.frequency"])) / 100.0
-        chiller_w_base = (float(row["CWP1.frequency"]) + float(row["CWP2.frequency"])) / 100.0
-        header_delta = 0.026 if i % 19 == 0 else 0.006
-        chiller_delta = 0.028 if i % 23 == 0 else 0.007
+            for offset in range(2):
+                pump_index = pump_start + offset
+                pump_rows.append(
+                    {
+                        "sample_time": sample_time,
+                        "group_id": header_group,
+                        "pump_id": f"CHWP{pump_index}",
+                        "status": 1,
+                        "speed_ratio": round(w_base + (-0.5 + offset) * speed_delta, 4),
+                        "head": round(30 + 15 * phase + 1.4 * (group_no - 1) + 0.7 * math.sin(i * 0.21 + offset), 3),
+                        "power_kw": round(34 + 43 * phase + 3.5 * (group_no - 1) + 1.1 * math.cos(i * 0.19 + offset), 3),
+                    }
+                )
 
-        pump_rows.extend(
-            [
-                {
-                    "sample_time": sample_time,
-                    "group_id": header_group,
-                    "pump_id": "CHWP1",
-                    "status": 1,
-                    "speed_ratio": round(header_w_base - header_delta / 2, 4),
-                    "head": float(row["CHWP1.head"]),
-                    "power_kw": float(row["CHWP1.power"]),
-                },
-                {
-                    "sample_time": sample_time,
-                    "group_id": header_group,
-                    "pump_id": "CHWP2",
-                    "status": 1,
-                    "speed_ratio": round(header_w_base + header_delta / 2, 4),
-                    "head": float(row["CHWP2.head"]),
-                    "power_kw": float(row["CHWP2.power"]),
-                },
-                {
-                    "sample_time": sample_time,
-                    "group_id": chiller_group,
-                    "pump_id": "CWP1",
-                    "status": 1,
-                    "speed_ratio": round(chiller_w_base - chiller_delta / 2, 4),
-                    "head": float(row["CWP1.head"]),
-                    "power_kw": float(row["CWP1.power"]),
-                },
-                {
-                    "sample_time": sample_time,
-                    "group_id": chiller_group,
-                    "pump_id": "CWP2",
-                    "status": 1,
-                    "speed_ratio": round(chiller_w_base + chiller_delta / 2, 4),
-                    "head": float(row["CWP2.head"]),
-                    "power_kw": float(row["CWP2.power"]),
-                },
-            ]
-        )
+        for group_no in range(1, 4):
+            chiller_group = f"chiller_group_{group_no}"
+            chiller_start = (group_no - 1) * 3 + 1
+            pump_start = (group_no - 1) * 2 + 1
+            w_base = min(0.98, 0.71 + 0.22 * phase + 0.016 * (group_no - 1) + 0.006 * math.cos(i * 0.16 + group_no))
+            speed_delta = 0.028 if (i + group_no) % 23 == 0 else 0.007
+
+            for offset in range(3):
+                chiller_index = chiller_start + offset
+                status = 1 if offset == 0 or i >= sample_count * offset // 3 else 0
+                base_flow = 245 + 155 * phase + 26 * offset + 16 * (group_no - 1)
+                chiller_rows.append(
+                    {
+                        "sample_time": sample_time,
+                        "group_id": chiller_group,
+                        "chiller_id": f"CH{chiller_index}",
+                        "flow_point_name": "0x0000021E",
+                        "flow_value": round(base_flow + 9 * math.sin(i * 0.31 + offset + group_no), 3),
+                        "status": status,
+                    }
+                )
+
+            for offset in range(2):
+                pump_index = pump_start + offset
+                pump_rows.append(
+                    {
+                        "sample_time": sample_time,
+                        "group_id": chiller_group,
+                        "pump_id": f"CWP{pump_index}",
+                        "status": 1,
+                        "speed_ratio": round(w_base + (-0.5 + offset) * speed_delta, 4),
+                        "head": round(25 + 12.5 * phase + 1.2 * (group_no - 1) + 0.6 * math.cos(i * 0.22 + offset), 3),
+                        "power_kw": round(33 + 41 * phase + 3.2 * (group_no - 1) + 1.0 * math.sin(i * 0.2 + offset), 3),
+                    }
+                )
 
     return pd.DataFrame(controller_rows), pd.DataFrame(chiller_rows), pd.DataFrame(pump_rows)
 

@@ -26,10 +26,11 @@ http://127.0.0.1:5174
 ## Data Flow
 
 ```text
-Vue page selections
+Vue time range, selected pump set, and single display-pump dropdown
   -> FastAPI /api/regression
   -> MySQL separated device tables by sample_time
   -> local JSON config
+  -> infer source type and group_id from selected pumps
   -> sum flow by source type, sample_time, and group_id
   -> match running pumps in the same group
   -> discard group/time samples when max(w)-min(w) > 0.02
@@ -57,4 +58,16 @@ Seed demo data for the new table structure:
 ```powershell
 cd F:\lykr\pump_curve_regression
 python sample_builder.py seed-separated-demo-db --mysql-exe G:\mysql-8.0.46-winx64\bin\mysql.exe --host 127.0.0.1 --port 3306 --user root --password "wdlwdl123." --database pump_curve_model --config F:\lykr\pump_model_config\pump_model_config.template.json --dataset-name sample_raw_points --sample-count 50
+```
+
+The demo seed creates:
+
+```text
+header_group_1: HCC1, HCC2 + CHWP1, CHWP2
+header_group_2: HCC3, HCC4 + CHWP3, CHWP4
+header_group_3: HCC5, HCC6 + CHWP5, CHWP6
+
+chiller_group_1: CH1, CH2, CH3 + CWP1, CWP2
+chiller_group_2: CH4, CH5, CH6 + CWP3, CWP4
+chiller_group_3: CH7, CH8, CH9 + CWP5, CWP6
 ```
