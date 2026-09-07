@@ -1,7 +1,12 @@
 <template>
   <section class="chart-panel">
     <header>
-      <h4>{{ chart?.title || '回归曲线' }}</h4>
+      <h4>
+        <span class="chart-title-main">{{ chart?.title || '回归曲线' }}</span>
+        <span v-for="(line, index) in chart?.formula_lines || []" :key="`${index}-${line}`" class="chart-formula">
+          {{ line }}
+        </span>
+      </h4>
       <span>{{ scatterCount }} 个点</span>
     </header>
     <div ref="chartEl" class="echart"></div>
@@ -28,7 +33,25 @@ let chartInstance = null
 const ACTUAL_SCATTER_COLOR = '#2563eb'
 const THEORY_SCATTER_COLOR = '#f97316'
 
-const scatterCount = computed(() => props.chart?.scatter?.length || 0)
+const scatterSeries = computed(() => {
+  if (props.chart?.scatter_series?.length) return props.chart.scatter_series
+  if (props.chart?.scatter?.length) {
+    return [
+      {
+        name: props.chart.scatter_name || '实际散点',
+        data: props.chart.scatter,
+        color: ACTUAL_SCATTER_COLOR,
+        symbolSize: 4.2,
+        opacity: 0.34,
+      },
+    ]
+  }
+  return []
+})
+
+const scatterCount = computed(() => {
+  return scatterSeries.value.reduce((sum, series) => sum + Number(series.data?.length || 0), 0)
+})
 
 function loadEcharts(assetBase) {
   if (window.echarts) return Promise.resolve(window.echarts)
@@ -43,7 +66,7 @@ function loadEcharts(assetBase) {
         resolve(window.echarts)
       } else {
         window.__pumpCurveEchartsLoader = null
-        reject(new Error('ECharts 未正确初始化'))
+        reject(new Error('ECharts 加载完成但未初始化'))
       }
     }
     script.onerror = () => {
@@ -65,7 +88,7 @@ function tooltipFormatter(param) {
     `${props.chart?.x_name || 'X'}: ${Number.isFinite(x) ? x.toFixed(3) : '-'}`,
     `${props.chart?.y_name || 'Y'}: ${Number.isFinite(y) ? y.toFixed(3) : '-'}`,
   ]
-  if (param.seriesType === 'scatter') {
+  if (param.seriesType === 'scatter' && value.length >= 3) {
     rows.push(`w: ${Number.isFinite(w) ? w.toFixed(3) : '-'}`)
     if (value[3]) rows.push(`时间: ${value[3]}`)
   }
@@ -80,14 +103,14 @@ function axisLabelFormatter(value) {
 
 function buildOption() {
   const chart = props.chart || {}
-  const scatter = chart.scatter || []
   const lines = chart.lines || []
+  const allScatter = scatterSeries.value
   const xValues = [
-    ...scatter.map((point) => Number(point[0])),
+    ...allScatter.flatMap((series) => (series.data || []).map((point) => Number(point[0]))),
     ...lines.flatMap((line) => (line.points || []).map((point) => Number(point[0]))),
   ].filter(Number.isFinite)
   const yValues = [
-    ...scatter.map((point) => Number(point[1])),
+    ...allScatter.flatMap((series) => (series.data || []).map((point) => Number(point[1]))),
     ...lines.flatMap((line) => (line.points || []).map((point) => Number(point[1]))),
   ].filter(Number.isFinite)
 
@@ -99,21 +122,47 @@ function buildOption() {
   const xPad = xMax === xMin ? Math.max(1, Math.abs(xMax) * 0.1) : (xMax - xMin) * 0.12
   const yPad = yMax === yMin ? Math.max(1, Math.abs(yMax) * 0.1) : (yMax - yMin) * 0.12
 
-  const xAxisMin = xMin - xPad
-  const xAxisMax = xMax + xPad
-  const yAxisMin = yMin - yPad
-  const yAxisMax = yMax + yPad
-  const theoryScatterSeries = lines
+  const scatterEntries = allScatter.map((series) => ({
+    name: series.name || '实际散点',
+    type: 'scatter',
+    data: series.data || [],
+    symbolSize: series.symbolSize || 4.2,
+    itemStyle: {
+      color: series.color || ACTUAL_SCATTER_COLOR,
+      opacity: series.opacity ?? 0.34,
+      borderWidth: 0,
+    },
+    emphasis: {
+      focus: 'series',
+    },
+  }))
+
+  const lineEntries = lines.map((line, index) => ({
+    name: line.name || `拟合曲线 ${index + 1}`,
+    type: 'line',
+    data: line.points || [],
+    showSymbol: false,
+    smooth: false,
+    lineStyle: {
+      color: line.color,
+      width: line.line_type === 'dashed' ? 2.1 : 2.6,
+      type: line.line_type || 'solid',
+    },
+    emphasis: {
+      focus: 'series',
+    },
+  }))
+
+  const theoryScatterEntries = lines
     .filter((line) => line.line_type === 'dashed')
     .map((line) => ({
       name: `${line.name || '理论曲线'}散点`,
       type: 'scatter',
       data: line.points || [],
-      symbolSize: 3.5,
+      symbolSize: 4.2,
       itemStyle: {
         color: THEORY_SCATTER_COLOR,
-        opacity: 0.48,
-        borderColor: '#7c2d12',
+        opacity: 0.24,
         borderWidth: 0,
       },
       emphasis: {
@@ -121,44 +170,7 @@ function buildOption() {
       },
     }))
 
-  const series = [
-    {
-      name: chart.scatter_name || '有效散点',
-      type: 'scatter',
-      data: scatter,
-      symbolSize: 4,
-      itemStyle: {
-        color: ACTUAL_SCATTER_COLOR,
-        opacity: 0.46,
-        borderColor: '#223044',
-        borderWidth: 0,
-      },
-      emphasis: {
-        focus: 'series',
-      },
-    },
-    ...lines.map((line, index) => {
-      const isTheory = line.line_type === 'dashed'
-      return {
-        name: line.name || `fit ${index + 1}`,
-        type: 'line',
-        data: line.points || [],
-        showSymbol: false,
-        smooth: false,
-        lineStyle: {
-          width: isTheory ? 2.2 : index === 0 && lines.length === 1 ? 2.8 : 2.1,
-          type: line.line_type || 'solid',
-        },
-        emphasis: {
-          focus: 'series',
-        },
-      }
-    }),
-    ...theoryScatterSeries,
-  ]
-
   return {
-    color: ['#0f766e', '#2563eb', '#dc2626', '#9333ea', '#ea580c', '#0891b2'],
     animationDuration: 450,
     tooltip: {
       trigger: 'item',
@@ -174,8 +186,8 @@ function buildOption() {
     grid: {
       left: 62,
       right: 24,
-      top: 56,
-      bottom: 86,
+      top: 58,
+      bottom: 88,
       containLabel: true,
     },
     dataZoom: [
@@ -187,8 +199,8 @@ function buildOption() {
       name: chart.x_name || 'Q',
       nameLocation: 'middle',
       nameGap: 42,
-      min: xAxisMin,
-      max: xAxisMax,
+      min: xMin - xPad,
+      max: xMax + xPad,
       scale: true,
       axisLabel: {
         formatter: axisLabelFormatter,
@@ -201,8 +213,8 @@ function buildOption() {
       name: chart.y_name || 'Y',
       nameLocation: 'middle',
       nameGap: 48,
-      min: yAxisMin,
-      max: yAxisMax,
+      min: yMin - yPad,
+      max: yMax + yPad,
       scale: true,
       axisLabel: {
         formatter: axisLabelFormatter,
@@ -210,7 +222,7 @@ function buildOption() {
       axisLine: { lineStyle: { color: '#708096' } },
       splitLine: { lineStyle: { color: '#e7edf4' } },
     },
-    series,
+    series: [...scatterEntries, ...lineEntries, ...theoryScatterEntries],
   }
 }
 

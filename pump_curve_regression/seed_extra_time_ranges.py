@@ -21,16 +21,15 @@ import pandas as pd
 from sample_builder import run_mysql, sql_quote
 
 
-HEADER_FLOW_POINT = "0x0000024A"
-
-
-def pair_statuses(index: int, group_no: int, period_index: int = 0) -> Tuple[int, int]:
+def pump_statuses(index: int, group_no: int, period_index: int = 0) -> Tuple[int, int, int]:
     selector = (index + group_no + period_index) % 16
     if selector in {0, 7}:
-        return 1, 0
+        return 1, 1, 0
     if selector == 11:
-        return 0, 1
-    return 1, 1
+        return 1, 0, 1
+    if selector == 14:
+        return 0, 1, 1
+    return 1, 1, 1
 
 
 def controller_status(index: int, group_no: int, offset: int, period_index: int = 0) -> int:
@@ -68,12 +67,13 @@ def generate_period_rows(
             header_group = f"header_group_{group_no}"
             controller_start = (group_no - 1) * 2 + 1
             pump_start = (group_no - 1) * 2 + 1
+            pump_indices = [pump_start, pump_start + 1, 6 + group_no]
             group_bias = 1.0 + 0.075 * (group_no - 1)
             header_total = (235 + 455 * phase + 28 * load_wave) * day_bias * group_bias
             controller_split = 0.50 + 0.035 * math.sin(i * 0.17 + group_no + period_index)
             w_base = min(1.04, 0.66 + 0.30 * phase + 0.018 * group_no + 0.018 * period_index)
             speed_delta = 0.030 if (i + group_no + period_index) % 27 == 0 else 0.008
-            pump_statuses = pair_statuses(i, group_no, period_index)
+            statuses = pump_statuses(i, group_no, period_index)
 
             for offset, ratio in enumerate([controller_split, 1 - controller_split]):
                 controller_rows.append(
@@ -81,21 +81,19 @@ def generate_period_rows(
                         "sample_time": sample_time,
                         "group_id": header_group,
                         "controller_id": f"HCC{controller_start + offset}",
-                        "flow_point_name": HEADER_FLOW_POINT,
                         "flow_value": round(header_total * ratio, 3),
                         "status": controller_status(i, group_no, offset, period_index),
                     }
                 )
 
-            for offset in range(2):
-                pump_index = pump_start + offset
-                w = w_base + (-0.5 + offset) * speed_delta
+            for offset, pump_index in enumerate(pump_indices):
+                w = w_base + (offset - 1) * speed_delta
                 pump_rows.append(
                     {
                         "sample_time": sample_time,
                         "group_id": header_group,
                         "pump_id": f"CHWP{pump_index}",
-                        "status": pump_statuses[offset],
+                        "status": statuses[offset],
                         "speed_ratio": round(w, 4),
                         "head": round(29.2 + 16.8 * phase + 1.55 * (group_no - 1) + 0.65 * period_index + 0.85 * math.sin(i * 0.16 + offset), 3),
                         "power_kw": round(35.5 + 49 * phase + 3.8 * (group_no - 1) + 1.9 * period_index + 1.3 * math.cos(i * 0.14 + offset), 3),
@@ -106,9 +104,10 @@ def generate_period_rows(
             chiller_group = f"chiller_group_{group_no}"
             chiller_start = (group_no - 1) * 3 + 1
             pump_start = (group_no - 1) * 2 + 1
+            pump_indices = [pump_start, pump_start + 1, 6 + group_no]
             w_base = min(1.04, 0.68 + 0.27 * phase + 0.016 * group_no + 0.015 * period_index)
             speed_delta = 0.032 if (i + group_no + period_index) % 29 == 0 else 0.009
-            pump_statuses = pair_statuses(i, group_no, period_index)
+            statuses = pump_statuses(i, group_no, period_index)
 
             for offset in range(3):
                 chiller_index = chiller_start + offset
@@ -124,15 +123,14 @@ def generate_period_rows(
                     }
                 )
 
-            for offset in range(2):
-                pump_index = pump_start + offset
-                w = w_base + (-0.5 + offset) * speed_delta
+            for offset, pump_index in enumerate(pump_indices):
+                w = w_base + (offset - 1) * speed_delta
                 pump_rows.append(
                     {
                         "sample_time": sample_time,
                         "group_id": chiller_group,
                         "pump_id": f"CWP{pump_index}",
-                        "status": pump_statuses[offset],
+                        "status": statuses[offset],
                         "speed_ratio": round(w, 4),
                         "head": round(24.2 + 14.3 * phase + 1.35 * (group_no - 1) + 0.55 * period_index + 0.75 * math.cos(i * 0.18 + offset), 3),
                         "power_kw": round(33.8 + 46 * phase + 3.5 * (group_no - 1) + 1.7 * period_index + 1.2 * math.sin(i * 0.15 + offset), 3),
@@ -159,7 +157,7 @@ def insert_rows(
     controller_values = [
         "("
         f"{sql_quote(dataset_name)}, {sql_quote(row['sample_time'])}, {sql_quote(row['group_id'])}, "
-        f"{sql_quote(row['controller_id'])}, {sql_quote(row['flow_point_name'])}, "
+        f"{sql_quote(row['controller_id'])}, "
         f"{repr(float(row['flow_value']))}, {int(row['status'])}"
         ")"
         for _, row in controller_rows.iterrows()
@@ -168,14 +166,13 @@ def insert_rows(
         statements.append(
             """
 INSERT INTO pump_header_controller_values
-  (dataset_name, sample_time, group_id, controller_id, flow_point_name, flow_value, status)
+  (dataset_name, sample_time, group_id, controller_id, flow_value, status)
 VALUES
 """
             + ",\n".join(batch)
             + """
 ON DUPLICATE KEY UPDATE
   group_id = VALUES(group_id),
-  flow_point_name = VALUES(flow_point_name),
   flow_value = VALUES(flow_value),
   status = VALUES(status);
 """

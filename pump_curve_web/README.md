@@ -28,8 +28,8 @@ http://127.0.0.1:5174
 ```text
 Vue time range
   -> FastAPI /api/regression
-  -> MySQL pump_point_index maps point names to target table columns
-  -> MySQL separated device tables by sample_time
+  -> MySQL ly_czwxc.ly_cpn reads device catalog, names, types, and group_id
+  -> InfluxDB czwxc_1 reads time-series values by true_cpn_name and point measurement
   -> local JSON config
   -> calculate every group and every running pump in the selected time range
   -> sum flow by source type, sample_time, and group_id
@@ -51,29 +51,60 @@ The config file stays in:
 F:\lykr\pump_model_config\pump_model_config.template.json
 ```
 
-MySQL stores the new separated source data in:
+MySQL now stores the device catalog in:
 
 ```text
-pump_header_controller_values: header controller status point 0x00000200, header controller flow point 0x0000024A
-pump_chiller_values: chiller status and flow values; point names are resolved by pump_point_index
-pump_device_values: pump status, speed_ratio, head, power_kw; point names are resolved by pump_point_index
-pump_point_index: point_name to target table/column mapping
+database: ly_czwxc
+table: ly_cpn
+cpn_type: 32 = chiller, 36 = pump, 38 = header controller
+group_id: group number used to pair source devices with pumps
+show_name: frontend display name
+true_cpn_name: InfluxDB cpn_name tag value
 ```
 
-Pump point index:
+InfluxDB now stores the time-series values in:
 
 ```text
-0x00000200 -> pump_device_values.status
-0x00000210 -> pump_device_values.speed_ratio
-0x00000212 -> pump_device_values.head
-0x00000220 -> pump_device_values.power_kw
-0x00000200 -> pump_chiller_values.status
-0x0000021D -> pump_chiller_values.flow_value
-0x00000200 -> pump_header_controller_values.status
-0x0000024A -> pump_header_controller_values.flow_value
+bucket/database: czwxc_1
+measurement format: ly_{cpn_type}_FFFFFFFF_{point_name}
+tag filter: cpn_name = ly_cpn.true_cpn_name
+field filter: _field = value
 ```
 
-Seed demo data for the new table structure:
+Point mapping:
+
+```text
+ly_32_FFFFFFFF_0x00000200: chiller status
+ly_32_FFFFFFFF_0x0000021D: chiller flow
+ly_36_FFFFFFFF_0x00000200: pump status
+ly_36_FFFFFFFF_0x00000210: pump speed ratio w
+ly_36_FFFFFFFF_0x00000212: pump head H
+ly_36_FFFFFFFF_0x00000220: pump power P
+ly_38_FFFFFFFF_0x00000200: header controller status
+ly_38_FFFFFFFF_0x0000024A: header controller flow
+```
+
+Runtime connection defaults can be overridden with environment variables:
+
+```text
+PUMP_CPN_MYSQL_EXE
+PUMP_CPN_MYSQL_HOST
+PUMP_CPN_MYSQL_PORT
+PUMP_CPN_MYSQL_USER
+PUMP_CPN_MYSQL_PASSWORD
+PUMP_CPN_MYSQL_DATABASE
+PUMP_CPN_MYSQL_TABLE
+PUMP_INFLUX_URL
+PUMP_INFLUX_TOKEN
+PUMP_INFLUX_ORG
+PUMP_INFLUX_BUCKET
+PUMP_INFLUX_AGGREGATE_WINDOW
+PUMP_INFLUX_TIMEZONE
+PUMP_INFLUX_TYPE_CODE_FORMAT
+PUMP_INFLUX_POINT_INCLUDE_0X
+```
+
+The old demo seed commands below are kept only for local simulated-data tests:
 
 ```powershell
 cd F:\lykr\pump_curve_regression

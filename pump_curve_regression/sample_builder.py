@@ -30,17 +30,18 @@ import pandas as pd
 
 DEFAULT_EFFICIENCY_FACTOR = 0.00275
 DEFAULT_SPEED_RATIO_TOLERANCE = 0.02
-HEADER_CONTROLLER_FLOW_POINT_NAME = "0x0000024A"
 SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def demo_pair_statuses(index: int, group_no: int, period_index: int = 0) -> Tuple[int, int]:
+def demo_pump_statuses(index: int, group_no: int, period_index: int = 0) -> Tuple[int, int, int]:
     selector = (index + group_no + period_index) % 16
     if selector in {0, 7}:
-        return 1, 0
+        return 1, 1, 0
     if selector == 11:
-        return 0, 1
-    return 1, 1
+        return 1, 0, 1
+    if selector == 14:
+        return 0, 1, 1
+    return 1, 1, 1
 
 
 def demo_controller_status(index: int, group_no: int, offset: int, period_index: int = 0) -> int:
@@ -487,20 +488,17 @@ def read_controller_rows_from_db(
     target_table = indexed_target_table(point_index, ["header_controller_flow", "header_controller_status"])
     flow_column = indexed_column(point_index, "header_controller_flow")
     status_column = indexed_column(point_index, "header_controller_status")
-    flow_point_name = point_index["header_controller_flow"]["point_name"]
     conditions = [f"dataset_name = {sql_quote(dataset_name)}"]
     if start_time:
         conditions.append(f"sample_time >= {sql_quote(start_time)}")
     if end_time:
         conditions.append(f"sample_time <= {sql_quote(end_time)}")
-    conditions.append(f"flow_point_name = {sql_quote(flow_point_name)}")
     sql = f"""
 SELECT
   dataset_name,
   sample_time,
   group_id,
   controller_id,
-  flow_point_name,
   {flow_column} AS flow_value,
   {status_column} AS status
 FROM {target_table}
@@ -513,7 +511,7 @@ ORDER BY sample_time, group_id, controller_id;
         if not line.strip() or line.startswith("dataset_name\t"):
             continue
         parts = line.split("\t")
-        if len(parts) != 7:
+        if len(parts) != 6:
             continue
         rows.append(
             {
@@ -521,9 +519,8 @@ ORDER BY sample_time, group_id, controller_id;
                 "sample_time": parts[1],
                 "group_id": parts[2],
                 "device_id": parts[3],
-                "flow_point_name": parts[4],
-                "flow_value": to_float(parts[5]),
-                "status": to_float(parts[6]),
+                "flow_value": to_float(parts[4]),
+                "status": to_float(parts[5]),
             }
         )
     return pd.DataFrame(rows)
@@ -1066,9 +1063,10 @@ def generate_demo_separated_device_rows(sample_count: int = 50) -> Tuple[pd.Data
             controller_split = 0.50 + 0.03 * math.sin(i * 0.23 + group_no * 0.7)
             controller_start = (group_no - 1) * 2 + 1
             pump_start = (group_no - 1) * 2 + 1
+            pump_indices = [pump_start, pump_start + 1, 6 + group_no]
             w_base = min(0.98, 0.70 + 0.23 * phase + 0.018 * (group_no - 1) + 0.006 * math.sin(i * 0.18 + group_no))
             speed_delta = 0.026 if (i + group_no) % 19 == 0 else 0.006
-            pump_statuses = demo_pair_statuses(i, group_no)
+            statuses = demo_pump_statuses(i, group_no)
 
             for offset, ratio in enumerate([controller_split, 1 - controller_split]):
                 controller_rows.append(
@@ -1076,21 +1074,19 @@ def generate_demo_separated_device_rows(sample_count: int = 50) -> Tuple[pd.Data
                         "sample_time": sample_time,
                         "group_id": header_group,
                         "controller_id": f"HCC{controller_start + offset}",
-                        "flow_point_name": HEADER_CONTROLLER_FLOW_POINT_NAME,
                         "flow_value": round(header_total * ratio, 3),
                         "status": demo_controller_status(i, group_no, offset),
                     }
                 )
 
-            for offset in range(2):
-                pump_index = pump_start + offset
+            for offset, pump_index in enumerate(pump_indices):
                 pump_rows.append(
                     {
                         "sample_time": sample_time,
                         "group_id": header_group,
                         "pump_id": f"CHWP{pump_index}",
-                        "status": pump_statuses[offset],
-                        "speed_ratio": round(w_base + (-0.5 + offset) * speed_delta, 4),
+                        "status": statuses[offset],
+                        "speed_ratio": round(w_base + (offset - 1) * speed_delta, 4),
                         "head": round(30 + 15 * phase + 1.4 * (group_no - 1) + 0.7 * math.sin(i * 0.21 + offset), 3),
                         "power_kw": round(34 + 43 * phase + 3.5 * (group_no - 1) + 1.1 * math.cos(i * 0.19 + offset), 3),
                     }
@@ -1100,9 +1096,10 @@ def generate_demo_separated_device_rows(sample_count: int = 50) -> Tuple[pd.Data
             chiller_group = f"chiller_group_{group_no}"
             chiller_start = (group_no - 1) * 3 + 1
             pump_start = (group_no - 1) * 2 + 1
+            pump_indices = [pump_start, pump_start + 1, 6 + group_no]
             w_base = min(0.98, 0.71 + 0.22 * phase + 0.016 * (group_no - 1) + 0.006 * math.cos(i * 0.16 + group_no))
             speed_delta = 0.028 if (i + group_no) % 23 == 0 else 0.007
-            pump_statuses = demo_pair_statuses(i, group_no)
+            statuses = demo_pump_statuses(i, group_no)
 
             for offset in range(3):
                 chiller_index = chiller_start + offset
@@ -1118,15 +1115,14 @@ def generate_demo_separated_device_rows(sample_count: int = 50) -> Tuple[pd.Data
                     }
                 )
 
-            for offset in range(2):
-                pump_index = pump_start + offset
+            for offset, pump_index in enumerate(pump_indices):
                 pump_rows.append(
                     {
                         "sample_time": sample_time,
                         "group_id": chiller_group,
                         "pump_id": f"CWP{pump_index}",
-                        "status": pump_statuses[offset],
-                        "speed_ratio": round(w_base + (-0.5 + offset) * speed_delta, 4),
+                        "status": statuses[offset],
+                        "speed_ratio": round(w_base + (offset - 1) * speed_delta, 4),
                         "head": round(25 + 12.5 * phase + 1.2 * (group_no - 1) + 0.6 * math.cos(i * 0.22 + offset), 3),
                         "power_kw": round(33 + 41 * phase + 3.2 * (group_no - 1) + 1.0 * math.sin(i * 0.2 + offset), 3),
                     }
@@ -1158,7 +1154,7 @@ def seed_separated_device_values(
         controller_values.append(
             "("
             f"{sql_quote(dataset_name)}, {sql_quote(row['sample_time'])}, {sql_quote(row['group_id'])}, "
-            f"{sql_quote(row['controller_id'])}, {sql_quote(row['flow_point_name'])}, "
+            f"{sql_quote(row['controller_id'])}, "
             f"{repr(float(row['flow_value']))}, {int(row['status'])}"
             ")"
         )
@@ -1166,14 +1162,13 @@ def seed_separated_device_values(
         statements.append(
             """
 INSERT INTO pump_header_controller_values
-  (dataset_name, sample_time, group_id, controller_id, flow_point_name, flow_value, status)
+  (dataset_name, sample_time, group_id, controller_id, flow_value, status)
 VALUES
 """
             + ",\n".join(controller_values)
             + """
 ON DUPLICATE KEY UPDATE
   group_id = VALUES(group_id),
-  flow_point_name = VALUES(flow_point_name),
   flow_value = VALUES(flow_value),
   status = VALUES(status);
 """
