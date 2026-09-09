@@ -19,22 +19,22 @@
         <div class="control-topline">
           <div>
             <h2>分析条件</h2>
-            <p>选择一个或两个时间段，后台会计算全部分组下的水泵样本，前端按组展示曲线。</p>
+            <p>先选择时间段，再填写理论曲线系数；后台会读取运行数据回归“实际拟合曲线”，并按你输入的 a/b/c 与 j/k/l 生成“理论拟合曲线”。</p>
           </div>
-          <label class="dataset-field">
-            <span>数据集名称</span>
-            <input v-model="form.dataset_name" type="text" @change="reloadDataset" />
-          </label>
         </div>
 
         <div class="time-ranges">
-          <div class="time-card primary-range" :class="{ complete: form.start_time && form.end_time }">
+          <div class="time-card primary-range range-one" :class="{ complete: form.start_time && form.end_time }">
+            <div class="time-card-top">
+              <span>必选时间窗</span>
+              <strong>{{ form.start_time && form.end_time ? '已就绪' : '待选择' }}</strong>
+            </div>
             <div class="range-heading">
               <div class="range-title">
                 <span class="range-index">1</span>
                 <div>
                   <h2>时间段 1</h2>
-                  <small>Range A</small>
+                  <small>作为基准分析区间</small>
                 </div>
               </div>
               <span class="range-badge">必选</span>
@@ -52,16 +52,20 @@
           </div>
 
           <div class="range-connector" aria-hidden="true">
-            <span></span>
+            <span>对比</span>
           </div>
 
-          <div class="time-card optional-range" :class="{ complete: hasCompleteSecondRange }">
+          <div class="time-card optional-range range-two" :class="{ complete: hasCompleteSecondRange }">
+            <div class="time-card-top">
+              <span>可选时间窗</span>
+              <strong>{{ hasCompleteSecondRange ? '已就绪' : '可留空' }}</strong>
+            </div>
             <div class="range-heading">
               <div class="range-title">
                 <span class="range-index">2</span>
                 <div>
                   <h2>时间段 2</h2>
-                  <small>Range B</small>
+                  <small>用于同图对比分析</small>
                 </div>
               </div>
               <button type="button" :disabled="!hasSecondInput" @click="clearSecondRange">清空</button>
@@ -79,6 +83,65 @@
           </div>
         </div>
 
+        <div class="theory-coefficients" :class="{ complete: hasValidTheoryCoefficients }">
+          <div class="theory-heading">
+            <div class="theory-title">
+              <span class="range-index theory-index">3</span>
+              <div>
+                <h2>理论曲线系数</h2>
+                <small>按归一化公式填写设计曲线系数：虚线理论拟合曲线由这些系数生成，实测数据回归得到实线实际拟合曲线。</small>
+              </div>
+            </div>
+            <span class="range-badge" :class="{ done: hasValidTheoryCoefficients }">
+              {{ hasValidTheoryCoefficients ? '系数已就绪' : '待填写' }}
+            </span>
+          </div>
+
+          <div class="theory-group-grid">
+            <div class="theory-group head-group">
+              <div class="theory-group-title">
+                <strong>扬程 H 与流量 Q</strong>
+                <span>H_eq = a·Q_eq² + b·Q_eq + c</span>
+              </div>
+              <div class="theory-input-grid">
+                <label class="theory-field">
+                  <span>系数 a</span>
+                  <input v-model="form.theory.a" type="number" step="any" placeholder="二次项系数" @input="handleCoefficientChange" />
+                </label>
+                <label class="theory-field">
+                  <span>系数 b</span>
+                  <input v-model="form.theory.b" type="number" step="any" placeholder="一次项系数" @input="handleCoefficientChange" />
+                </label>
+                <label class="theory-field">
+                  <span>系数 c</span>
+                  <input v-model="form.theory.c" type="number" step="any" placeholder="常数项 (m)" @input="handleCoefficientChange" />
+                </label>
+              </div>
+            </div>
+
+            <div class="theory-group efficiency-group">
+              <div class="theory-group-title">
+                <strong>效率 η 与流量 Q</strong>
+                <span>η = j·Q_eq² + k·Q_eq + l</span>
+              </div>
+              <div class="theory-input-grid">
+                <label class="theory-field">
+                  <span>系数 j</span>
+                  <input v-model="form.theory.j" type="number" step="any" placeholder="二次项系数" @input="handleCoefficientChange" />
+                </label>
+                <label class="theory-field">
+                  <span>系数 k</span>
+                  <input v-model="form.theory.k" type="number" step="any" placeholder="一次项系数" @input="handleCoefficientChange" />
+                </label>
+                <label class="theory-field">
+                  <span>系数 l</span>
+                  <input v-model="form.theory.l" type="number" step="any" placeholder="常数项 (0-1)" @input="handleCoefficientChange" />
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="confirm-row">
           <div>
             <strong>确认后开始分析</strong>
@@ -90,35 +153,67 @@
         </div>
       </section>
 
-      <section v-if="baseResult" class="selection-layout group-pump-layout">
-        <div class="selection-panel">
-          <div class="panel-heading">
-            <h2>曲线展示范围</h2>
+      <section v-if="baseResult" class="selection-layout group-pump-layout display-scope-layout">
+        <div class="selection-panel display-scope-panel">
+          <div class="panel-heading display-scope-heading">
+            <div>
+              <span class="panel-eyebrow">Display Scope</span>
+              <h2>曲线展示范围</h2>
+            </div>
+            <span class="scope-badge">已生成回归结果</span>
           </div>
-          <div class="selector-grid single-selector">
-            <label class="select-field">
-              <span>组别</span>
-              <select v-model="selectedGroupId">
-                <option v-for="group in groupOptions" :key="group.id" :value="group.id">
-                  {{ group.name }} / {{ group.id }}
-                </option>
-              </select>
+          <p class="display-scope-copy">选择一个设备组，页面会展示该组内全部水泵的归一化曲线与拟合结果。</p>
+          <div class="selector-grid single-selector display-scope-select">
+            <label class="select-field display-scope-field">
+              <span class="field-label">当前设备组</span>
+              <div class="select-shell">
+                <select v-model="selectedGroupId">
+                  <option v-for="group in groupOptions" :key="group.id" :value="group.id">
+                    {{ group.name }} / {{ group.id }}
+                  </option>
+                </select>
+              </div>
             </label>
           </div>
-          <div v-if="selectedGroup" class="selected-pump">
-            <strong>{{ selectedGroup.name }}</strong>
-            <span>组号 {{ selectedGroup.id }}</span>
-            <span>来源 {{ selectedGroup.source_label }}</span>
-            <span>组内水泵 {{ groupPumpItems.length }} 台</span>
+          <div v-if="selectedGroup" class="selected-group-card">
+            <div class="selected-group-main">
+              <span class="selected-group-icon">⌁</span>
+              <strong>{{ selectedGroup.name }}</strong>
+              <span>当前正在查看的回归曲线分组</span>
+            </div>
+            <div class="selected-group-stats">
+              <span>
+                <small>组号</small>
+                <b>{{ selectedGroup.id }}</b>
+              </span>
+              <span>
+                <small>来源</small>
+                <b>{{ selectedGroup.source_label }}</b>
+              </span>
+              <span>
+                <small>组内水泵</small>
+                <b>{{ groupPumpItems.length }} 台</b>
+              </span>
+              <span>
+                <small>时间段</small>
+                <b>{{ selectedRangeCount }} 个</b>
+              </span>
+            </div>
           </div>
         </div>
 
-        <aside class="summary-panel">
-          <h2>分析概况</h2>
+        <aside class="summary-panel display-summary-panel">
+          <div class="summary-heading">
+            <div>
+              <span class="panel-eyebrow">Overview</span>
+              <h2>分析概况</h2>
+            </div>
+            <span class="summary-status"><i></i> 已就绪</span>
+          </div>
           <dl>
             <div>
               <dt>时间段数量</dt>
-              <dd>{{ visiblePayloads.length }}</dd>
+              <dd>{{ selectedRangeCount }}</dd>
             </div>
             <div>
               <dt>有效样本</dt>
@@ -141,8 +236,8 @@
       <section v-if="baseResult && selectedGroupId && coefficientRows.length" class="coefficient-panel">
         <div class="coefficient-header">
           <div>
-            <h2>回归系数表</h2>
-            <p>每行对应选中组内某台水泵在某个时间段的最终拟合结果。</p>
+            <h2>实际拟合系数表</h2>
+              <p>每行是选中组内某台水泵基于所选时间段数据回归得到的实际拟合系数；虚线理论曲线由上方输入的 a/b/c、j/k/l 生成。</p>
           </div>
           <span>{{ coefficientRows.length }} 条结果</span>
         </div>
@@ -151,7 +246,7 @@
             <thead>
               <tr>
                 <th>水泵名称</th>
-                <th>时间段</th>
+                <th>拟合范围</th>
                 <th>H-Q 参数 a</th>
                 <th>H-Q 参数 b</th>
                 <th>H-Q 参数 c</th>
@@ -206,10 +301,9 @@
               </header>
 
               <div class="metrics">
-                <span v-if="resultFor(result, pump.id)">时间段 1：{{ periodStatusText(result, pump.id) }}</span>
-                <span v-if="resultFor(secondResult, pump.id)">时间段 2：{{ periodStatusText(secondResult, pump.id) }}</span>
-                <span v-if="bestResultFor(pump.id)">H-Q R2：{{ formatNumber(bestResultFor(pump.id).head_metrics?.r2) }}</span>
-                <span v-if="bestResultFor(pump.id)">η-Q R2：{{ formatNumber(bestResultFor(pump.id).efficiency_metrics?.r2) }}</span>
+                <span v-if="resultFor(result, pump.id)">合并数据：{{ periodStatusText(result, pump.id) }}</span>
+                <span v-if="bestResultFor(pump.id)">H-Q R²：{{ formatNumber(bestResultFor(pump.id).head_metrics?.r2) }}</span>
+                <span v-if="bestResultFor(pump.id)">η-Q R²：{{ formatNumber(bestResultFor(pump.id).efficiency_metrics?.r2) }}</span>
               </div>
 
               <div class="chart-grid normalized-only-grid">
@@ -218,7 +312,7 @@
               </div>
 
               <p v-if="hasUnfitPeriod(pump.id)" class="error-text pump-skip-text">
-                当前时间段内存在散点数不足 10 个的情况，已保留散点图，未生成对应拟合曲线。
+                合并后的有效散点数不足 10 个，已保留散点图，未生成拟合曲线。
               </p>
             </article>
           </div>
@@ -236,61 +330,78 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import RegressionChart from './components/RegressionChart.vue'
 
-const apiBase = 'http://127.0.0.1:8010'
+const apiBase = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8010'
+
+const DEFAULT_DATASET_NAME = 'sample_raw_points'
 
 const apiOk = ref(false)
 const options = ref(null)
 const result = ref(null)
-const secondResult = ref(null)
 const loading = ref(false)
 const error = ref('')
 const selectedGroupId = ref('')
 const hasConfirmedOnce = ref(false)
 
 const form = reactive({
-  dataset_name: 'sample_raw_points',
   start_time: '',
   end_time: '',
   second_start_time: '',
   second_end_time: '',
+  theory: {
+    a: '',
+    b: '',
+    c: '',
+    j: '',
+    k: '',
+    l: '',
+  },
 })
 
 const hasSecondInput = computed(() => Boolean(form.second_start_time || form.second_end_time))
 const hasCompleteSecondRange = computed(() => Boolean(form.second_start_time && form.second_end_time))
 const hasPartialSecondRange = computed(() => hasSecondInput.value && !hasCompleteSecondRange.value)
+function parseTheoryNumber(value) {
+  const text = value == null ? '' : String(value).trim()
+  if (text === '') return NaN
+  return Number(text)
+}
+
+const theoryValues = computed(() => ({
+  a: parseTheoryNumber(form.theory.a),
+  b: parseTheoryNumber(form.theory.b),
+  c: parseTheoryNumber(form.theory.c),
+  j: parseTheoryNumber(form.theory.j),
+  k: parseTheoryNumber(form.theory.k),
+  l: parseTheoryNumber(form.theory.l),
+}))
+
+const hasValidTheoryCoefficients = computed(() => {
+  return ['a', 'b', 'c', 'j', 'k', 'l'].every((key) => Number.isFinite(theoryValues.value[key]))
+})
 const hasPrimaryRange = computed(() => Boolean(form.start_time && form.end_time))
-const canRunRegression = computed(() => hasPrimaryRange.value && !hasPartialSecondRange.value && !loading.value)
-const baseResult = computed(() => result.value || secondResult.value)
+const canRunRegression = computed(() => hasPrimaryRange.value && !hasPartialSecondRange.value && hasValidTheoryCoefficients.value && !loading.value)
+const baseResult = computed(() => result.value)
+const selectedRangeCount = computed(() => hasCompleteSecondRange.value ? 2 : 1)
 const confirmHintText = computed(() => {
   if (!hasPrimaryRange.value) return '请先完整选择时间段 1 的开始和结束时间。'
+  if (!hasValidTheoryCoefficients.value) return '请先完整填写理论曲线系数：H-Q 的 a/b/c 与 η-Q 的 j/k/l。'
   if (hasPartialSecondRange.value) return '时间段 2 需要同时填写开始时间和结束时间。'
-  if (hasConfirmedOnce.value && !baseResult.value) return '时间已变更，点击确认后重新生成图像。'
-  return hasCompleteSecondRange.value ? '将同时生成两个时间段的对比图像。' : '将按时间段 1 生成回归图像。'
+  if (hasConfirmedOnce.value && !baseResult.value) return '时间段或系数已变更，点击确认后重新生成图像。'
+  return hasCompleteSecondRange.value ? '两个时间段的数据将合并后统一拟合。' : '将按时间段 1 生成回归图像。'
 })
 
 const visiblePayloads = computed(() => {
-  const payloads = []
-  if (result.value) {
-    payloads.push({
-      key: 'range-one',
-      label: '时间段 1',
-      data: result.value,
-      timeText: `${form.start_time} 至 ${form.end_time}`,
-      actualLineColor: '#2563eb',
-      actualScatterColor: '#2563eb',
-    })
-  }
-  if (secondResult.value) {
-    payloads.push({
-      key: 'range-two',
-      label: '时间段 2',
-      data: secondResult.value,
-      timeText: `${form.second_start_time} 至 ${form.second_end_time}`,
-      actualLineColor: '#0f766e',
-      actualScatterColor: '#dc2626',
-    })
-  }
-  return payloads
+  if (!result.value) return []
+  return [{
+    key: 'merged-ranges',
+    label: hasCompleteSecondRange.value ? '合并时间段' : '时间段 1',
+    data: result.value,
+    timeText: hasCompleteSecondRange.value
+      ? `${form.start_time} 至 ${form.end_time}；${form.second_start_time} 至 ${form.second_end_time}`
+      : `${form.start_time} 至 ${form.end_time}`,
+    actualLineColor: '#2563eb',
+    actualScatterColor: '#2563eb',
+  }]
 })
 
 const groupOptions = computed(() => {
@@ -320,38 +431,38 @@ const groupPumpItems = computed(() => {
 
 const coefficientRows = computed(() => {
   const rows = []
+  const payload = visiblePayloads.value[0]
+  if (!payload) return rows
   for (const pump of groupPumpItems.value) {
-    for (const payload of visiblePayloads.value) {
-      const item = resultFor(payload.data, pump.id)
-      if (!item) continue
-      rows.push({
-        pumpId: pump.id,
-        pumpName: pump.name || pump.id,
-        periodKey: payload.key,
-        periodLabel: payload.label,
-        fitAvailable: Boolean(item.fit_available),
-        a: item.head_coefficients?.a,
-        b: item.head_coefficients?.b,
-        c: item.head_coefficients?.c,
-        j: item.efficiency_coefficients?.j,
-        k: item.efficiency_coefficients?.k,
-        l: item.efficiency_coefficients?.l,
-      })
-    }
+    const item = resultFor(payload.data, pump.id)
+    if (!item) continue
+    rows.push({
+      pumpId: pump.id,
+      pumpName: pump.name || pump.id,
+      periodKey: payload.key,
+      periodLabel: payload.label,
+      fitAvailable: Boolean(item.fit_available),
+      a: item.head_coefficients?.a,
+      b: item.head_coefficients?.b,
+      c: item.head_coefficients?.c,
+      j: item.efficiency_coefficients?.j,
+      k: item.efficiency_coefficients?.k,
+      l: item.efficiency_coefficients?.l,
+    })
   }
   return rows
 })
 
 const totalValidSamples = computed(() => {
-  return visiblePayloads.value.reduce((sum, payload) => sum + Number(payload.data.valid_sample_count || 0), 0)
+  return Number(result.value?.valid_sample_count || 0)
 })
 
 const totalRejects = computed(() => {
-  return visiblePayloads.value.reduce((sum, payload) => sum + Number(payload.data.reject_count || 0), 0)
+  return Number(result.value?.reject_count || 0)
 })
 
 const totalSkipped = computed(() => {
-  return visiblePayloads.value.reduce((sum, payload) => sum + Number(payload.data.skipped?.length || 0), 0)
+  return Number(result.value?.skipped?.length || 0)
 })
 
 const rangeSummaryText = computed(() => {
@@ -365,11 +476,11 @@ function resultFor(payload, pumpId) {
 }
 
 function bestResultFor(pumpId) {
-  return [resultFor(result.value, pumpId), resultFor(secondResult.value, pumpId)].find((item) => item?.fit_available) || null
+  return resultFor(result.value, pumpId)?.fit_available ? resultFor(result.value, pumpId) : null
 }
 
 function hasAnyResult(pumpId) {
-  return Boolean(resultFor(result.value, pumpId) || resultFor(secondResult.value, pumpId))
+  return Boolean(resultFor(result.value, pumpId))
 }
 
 function periodStatusText(payload, pumpId) {
@@ -380,7 +491,8 @@ function periodStatusText(payload, pumpId) {
 }
 
 function hasUnfitPeriod(pumpId) {
-  return [resultFor(result.value, pumpId), resultFor(secondResult.value, pumpId)].some((item) => item && !item.fit_available)
+  const item = resultFor(result.value, pumpId)
+  return Boolean(item && !item.fit_available)
 }
 
 function formatNumber(value) {
@@ -419,19 +531,29 @@ function regressionFormulaFor(item, type, label) {
   return `${label}: η = ${formulaTerm(coefficients.j, 'Q_eq²', true)}${formulaTerm(coefficients.k, 'Q_eq')}${formulaTerm(coefficients.l, '')}`
 }
 
+function theoryFormulaLine(type) {
+  if (!hasValidTheoryCoefficients.value) return null
+  const v = theoryValues.value
+  if (type === 'head') {
+    return `理论曲线: H_eq = ${formulaTerm(v.a, 'Q_eq²', true)}${formulaTerm(v.b, 'Q_eq')}${formulaTerm(v.c, '')}`
+  }
+  return `理论曲线: η = ${formulaTerm(v.j, 'Q_eq²', true)}${formulaTerm(v.k, 'Q_eq')}${formulaTerm(v.l, '')}`
+}
+
 function formulaLinesFor(pumpId, type) {
-  return visiblePayloads.value.map((payload) => {
+  const lines = visiblePayloads.value.map((payload) => {
     const item = resultFor(payload.data, pumpId)
     return regressionFormulaFor(item, type, payload.label)
   })
+  const theoryLine = theoryFormulaLine(type)
+  if (theoryLine) lines.push(theoryLine)
+  return lines
 }
 
 function pumpSummaryText(pumpId) {
   const parts = []
   const first = resultFor(result.value, pumpId)
-  const second = resultFor(secondResult.value, pumpId)
-  if (first) parts.push(`时间段 1 n=${first.sample_count}`)
-  if (second) parts.push(`时间段 2 n=${second.sample_count}`)
+  if (first) parts.push(`${hasCompleteSecondRange.value ? '合并数据' : '时间段 1'} n=${first.sample_count}`)
   return parts.length ? parts.join(' / ') : '有效点不足'
 }
 
@@ -465,20 +587,17 @@ function addActualPeriod(chartData, pumpId, type, payload) {
 }
 
 function addCommonTheoryLine(chartData, pumpId, type) {
-  for (const payload of visiblePayloads.value) {
-    const source = chartSourceFor(payload, pumpId, type)
-    const theoryLines = (source?.lines || []).filter((line) => line.line_type === 'dashed')
-    if (!theoryLines.length) continue
-
-    for (const line of theoryLines) {
-      chartData.lines.push({
-        ...line,
-        name: '公共理论曲线',
-        color: '#f97316',
-        line_type: 'dashed',
-      })
-    }
-    return
+  const payload = visiblePayloads.value[0]
+  if (!payload) return
+  const source = chartSourceFor(payload, pumpId, type)
+  const theoryLines = (source?.lines || []).filter((line) => line.line_type === 'dashed')
+  for (const line of theoryLines) {
+    chartData.lines.push({
+      ...line,
+      name: '理论拟合曲线',
+      color: '#f97316',
+      line_type: 'dashed',
+    })
   }
 }
 
@@ -493,9 +612,8 @@ function combinedChartFor(pumpId, type) {
     lines: [],
   }
 
-  for (const payload of visiblePayloads.value) {
-    addActualPeriod(chartData, pumpId, type, payload)
-  }
+  const payload = visiblePayloads.value[0]
+  if (payload) addActualPeriod(chartData, pumpId, type, payload)
   addCommonTheoryLine(chartData, pumpId, type)
   return chartData
 }
@@ -515,7 +633,7 @@ function showSkippedAlert(payload, label) {
 
 async function loadOptions() {
   error.value = ''
-  const response = await fetch(`${apiBase}/api/options?dataset_name=${encodeURIComponent(form.dataset_name)}`)
+  const response = await fetch(`${apiBase}/api/options?dataset_name=${encodeURIComponent(DEFAULT_DATASET_NAME)}`)
   if (!response.ok) throw new Error('无法连接后端选项接口')
   options.value = await response.json()
   apiOk.value = true
@@ -526,30 +644,35 @@ async function loadOptions() {
   form.second_end_time = ''
 }
 
-async function reloadDataset() {
-  result.value = null
-  secondResult.value = null
-  selectedGroupId.value = ''
-  hasConfirmedOnce.value = false
-  await loadOptions()
-}
-
 function handleTimeChange() {
   result.value = null
-  secondResult.value = null
   selectedGroupId.value = ''
   error.value = hasPartialSecondRange.value ? '时间段 2 需要同时填写开始时间和结束时间。' : ''
 }
 
-async function runRegressionForRange(startTime, endTime) {
+function handleCoefficientChange() {
+  result.value = null
+  selectedGroupId.value = ''
+  error.value = ''
+}
+
+async function runRegressionForRanges() {
   const response = await fetch(`${apiBase}/api/regression`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      dataset_name: form.dataset_name,
-      start_time: startTime,
-      end_time: endTime,
+      dataset_name: DEFAULT_DATASET_NAME,
+      start_time: form.start_time,
+      end_time: form.end_time,
+      second_start_time: hasCompleteSecondRange.value ? form.second_start_time : null,
+      second_end_time: hasCompleteSecondRange.value ? form.second_end_time : null,
       pump_ids: [],
+      theory_a: theoryValues.value.a,
+      theory_b: theoryValues.value.b,
+      theory_c: theoryValues.value.c,
+      theory_j: theoryValues.value.j,
+      theory_k: theoryValues.value.k,
+      theory_l: theoryValues.value.l,
     }),
   })
   const payload = await response.json()
@@ -569,20 +692,12 @@ async function runAllRegression() {
   loading.value = true
   error.value = ''
   result.value = null
-  secondResult.value = null
   selectedGroupId.value = ''
 
   try {
-    const firstPayload = await runRegressionForRange(form.start_time, form.end_time)
-    result.value = firstPayload
-    chooseInitialGroup(firstPayload)
-    showSkippedAlert(firstPayload, '时间段 1')
-
-    if (hasCompleteSecondRange.value) {
-      const secondPayload = await runRegressionForRange(form.second_start_time, form.second_end_time)
-      secondResult.value = secondPayload
-      showSkippedAlert(secondPayload, '时间段 2')
-    }
+    result.value = await runRegressionForRanges()
+    chooseInitialGroup(result.value)
+    showSkippedAlert(result.value, hasCompleteSecondRange.value ? '合并时间段' : '时间段 1')
     hasConfirmedOnce.value = true
   } catch (err) {
     error.value = err.message || String(err)
@@ -594,7 +709,6 @@ async function runAllRegression() {
 async function clearSecondRange() {
   form.second_start_time = ''
   form.second_end_time = ''
-  secondResult.value = null
   handleTimeChange()
 }
 

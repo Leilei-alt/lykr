@@ -15,6 +15,7 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import * as echarts from 'echarts'
 
 const props = defineProps({
   chart: {
@@ -31,7 +32,6 @@ const chartEl = ref(null)
 let chartInstance = null
 
 const ACTUAL_SCATTER_COLOR = '#2563eb'
-const THEORY_SCATTER_COLOR = '#f97316'
 
 const scatterSeries = computed(() => {
   if (props.chart?.scatter_series?.length) return props.chart.scatter_series
@@ -59,7 +59,7 @@ function loadEcharts(assetBase) {
 
   window.__pumpCurveEchartsLoader = new Promise((resolve, reject) => {
     const script = document.createElement('script')
-    script.src = `${assetBase}/assets/echarts.min.js`
+    script.src = `${assetBase || ''}/assets/echarts.min.js`
     script.async = true
     script.onload = () => {
       if (window.echarts) {
@@ -153,22 +153,6 @@ function buildOption() {
     },
   }))
 
-  const theoryScatterEntries = lines
-    .filter((line) => line.line_type === 'dashed')
-    .map((line) => ({
-      name: `${line.name || '理论曲线'}散点`,
-      type: 'scatter',
-      data: line.points || [],
-      symbolSize: 4.2,
-      itemStyle: {
-        color: THEORY_SCATTER_COLOR,
-        opacity: 0.24,
-        borderWidth: 0,
-      },
-      emphasis: {
-        focus: 'series',
-      },
-    }))
 
   return {
     animationDuration: 450,
@@ -199,7 +183,7 @@ function buildOption() {
       name: chart.x_name || 'Q',
       nameLocation: 'middle',
       nameGap: 42,
-      min: xMin - xPad,
+      min: 0,
       max: xMax + xPad,
       scale: true,
       axisLabel: {
@@ -213,7 +197,7 @@ function buildOption() {
       name: chart.y_name || 'Y',
       nameLocation: 'middle',
       nameGap: 48,
-      min: yMin - yPad,
+      min: 0,
       max: yMax + yPad,
       scale: true,
       axisLabel: {
@@ -222,7 +206,7 @@ function buildOption() {
       axisLine: { lineStyle: { color: '#708096' } },
       splitLine: { lineStyle: { color: '#e7edf4' } },
     },
-    series: [...scatterEntries, ...lineEntries, ...theoryScatterEntries],
+    series: [...scatterEntries, ...lineEntries],
   }
 }
 
@@ -237,10 +221,9 @@ function resizeChart() {
 }
 
 onMounted(async () => {
-  await loadEcharts(props.assetBase)
   await nextTick()
   if (!chartEl.value) return
-  chartInstance = window.echarts.init(chartEl.value, 'white', {
+  chartInstance = echarts.init(chartEl.value, 'white', {
     renderer: 'canvas',
     locale: 'ZH',
   })

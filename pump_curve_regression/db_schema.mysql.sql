@@ -62,7 +62,6 @@ CREATE TABLE IF NOT EXISTS pump_header_controller_values (
   group_id VARCHAR(128) NOT NULL COMMENT 'Unique group number shared by controllers and pumps',
   controller_id VARCHAR(128) NOT NULL,
   flow_value DOUBLE NOT NULL COMMENT 'Header controller flow Q, m3/h',
-  status TINYINT NOT NULL DEFAULT 1,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uk_header_controller_dataset_time_device (dataset_name, sample_time, controller_id),

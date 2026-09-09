@@ -32,15 +32,6 @@ def pump_statuses(index: int, group_no: int, period_index: int = 0) -> Tuple[int
     return 1, 1, 1
 
 
-def controller_status(index: int, group_no: int, offset: int, period_index: int = 0) -> int:
-    selector = (index + group_no + period_index) % 10
-    if offset == 0 and selector == 6:
-        return 0
-    if offset == 1 and selector in {0, 5}:
-        return 0
-    return 1
-
-
 def chunks(values: List[str], size: int) -> Iterable[List[str]]:
     for index in range(0, len(values), size):
         yield values[index : index + size]
@@ -82,7 +73,6 @@ def generate_period_rows(
                         "group_id": header_group,
                         "controller_id": f"HCC{controller_start + offset}",
                         "flow_value": round(header_total * ratio, 3),
-                        "status": controller_status(i, group_no, offset, period_index),
                     }
                 )
 
@@ -158,7 +148,7 @@ def insert_rows(
         "("
         f"{sql_quote(dataset_name)}, {sql_quote(row['sample_time'])}, {sql_quote(row['group_id'])}, "
         f"{sql_quote(row['controller_id'])}, "
-        f"{repr(float(row['flow_value']))}, {int(row['status'])}"
+        f"{repr(float(row['flow_value']))}"
         ")"
         for _, row in controller_rows.iterrows()
     ]
@@ -166,15 +156,14 @@ def insert_rows(
         statements.append(
             """
 INSERT INTO pump_header_controller_values
-  (dataset_name, sample_time, group_id, controller_id, flow_value, status)
+  (dataset_name, sample_time, group_id, controller_id, flow_value)
 VALUES
 """
             + ",\n".join(batch)
             + """
 ON DUPLICATE KEY UPDATE
   group_id = VALUES(group_id),
-  flow_value = VALUES(flow_value),
-  status = VALUES(status);
+  flow_value = VALUES(flow_value);
 """
         )
 

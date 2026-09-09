@@ -1,5 +1,7 @@
 ﻿.venv/
 .idea/
+build/
+dist/
 __pycache__/
 *.pyc
 *.log
@@ -15,3 +17,4 @@ pump_curve_web/backend/static/
 pump_curve_web/frontend/node_modules/
 pump_curve_web/frontend/dist/
 pump_curve_web/browser_verification.png
+pump_app_config.json

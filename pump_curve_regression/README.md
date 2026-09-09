@@ -32,7 +32,7 @@ Calculated fields in the separated-table workflow:
 
 ```text
 Q_total = sum(flow_value) for the same source type, sample_time, and group_id
-discard sample when max(running pump w)-min(running pump w) > 0.02
+discard sample when max(running pump w)-min(running pump w) > 0.002
 Q_i = Q_total / running_pump_count
 eta = 0.00275 * Q * H / power
 ```

@@ -29,7 +29,7 @@ import pandas as pd
 
 
 DEFAULT_EFFICIENCY_FACTOR = 0.00275
-DEFAULT_SPEED_RATIO_TOLERANCE = 0.02
+DEFAULT_SPEED_RATIO_TOLERANCE = 0.002
 SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -42,15 +42,6 @@ def demo_pump_statuses(index: int, group_no: int, period_index: int = 0) -> Tupl
     if selector == 14:
         return 0, 1, 1
     return 1, 1, 1
-
-
-def demo_controller_status(index: int, group_no: int, offset: int, period_index: int = 0) -> int:
-    selector = (index + group_no + period_index) % 10
-    if offset == 0 and selector == 6:
-        return 0
-    if offset == 1 and selector in {0, 5}:
-        return 0
-    return 1
 
 
 @dataclass
@@ -483,11 +474,10 @@ def read_controller_rows_from_db(
         password,
         database,
         "header_controller",
-        ["header_controller_flow", "header_controller_status"],
+        ["header_controller_flow"],
     )
-    target_table = indexed_target_table(point_index, ["header_controller_flow", "header_controller_status"])
+    target_table = indexed_target_table(point_index, ["header_controller_flow"])
     flow_column = indexed_column(point_index, "header_controller_flow")
-    status_column = indexed_column(point_index, "header_controller_status")
     conditions = [f"dataset_name = {sql_quote(dataset_name)}"]
     if start_time:
         conditions.append(f"sample_time >= {sql_quote(start_time)}")
@@ -499,8 +489,7 @@ SELECT
   sample_time,
   group_id,
   controller_id,
-  {flow_column} AS flow_value,
-  {status_column} AS status
+  {flow_column} AS flow_value
 FROM {target_table}
 WHERE {" AND ".join(conditions)}
 ORDER BY sample_time, group_id, controller_id;
@@ -511,7 +500,7 @@ ORDER BY sample_time, group_id, controller_id;
         if not line.strip() or line.startswith("dataset_name\t"):
             continue
         parts = line.split("\t")
-        if len(parts) != 6:
+        if len(parts) != 5:
             continue
         rows.append(
             {
@@ -520,7 +509,6 @@ ORDER BY sample_time, group_id, controller_id;
                 "group_id": parts[2],
                 "device_id": parts[3],
                 "flow_value": to_float(parts[4]),
-                "status": to_float(parts[5]),
             }
         )
     return pd.DataFrame(rows)
@@ -1075,7 +1063,6 @@ def generate_demo_separated_device_rows(sample_count: int = 50) -> Tuple[pd.Data
                         "group_id": header_group,
                         "controller_id": f"HCC{controller_start + offset}",
                         "flow_value": round(header_total * ratio, 3),
-                        "status": demo_controller_status(i, group_no, offset),
                     }
                 )
 
@@ -1155,22 +1142,21 @@ def seed_separated_device_values(
             "("
             f"{sql_quote(dataset_name)}, {sql_quote(row['sample_time'])}, {sql_quote(row['group_id'])}, "
             f"{sql_quote(row['controller_id'])}, "
-            f"{repr(float(row['flow_value']))}, {int(row['status'])}"
+            f"{repr(float(row['flow_value']))}"
             ")"
         )
     if controller_values:
         statements.append(
             """
 INSERT INTO pump_header_controller_values
-  (dataset_name, sample_time, group_id, controller_id, flow_value, status)
+  (dataset_name, sample_time, group_id, controller_id, flow_value)
 VALUES
 """
             + ",\n".join(controller_values)
             + """
 ON DUPLICATE KEY UPDATE
   group_id = VALUES(group_id),
-  flow_value = VALUES(flow_value),
-  status = VALUES(status);
+  flow_value = VALUES(flow_value);
 """
         )
 

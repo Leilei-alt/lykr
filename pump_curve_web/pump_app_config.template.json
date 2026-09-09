@@ -1,0 +1,32 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8010
+  },
+  "model_mysql": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "pump_app",
+    "password": "",
+    "database": "pump_curve_model"
+  },
+  "cpn_mysql": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "pump_app",
+    "password": "",
+    "database": "ly_czwxc",
+    "table": "ly_cpn"
+  },
+  "influx": {
+    "url": "http://127.0.0.1:8086",
+    "token": "",
+    "org": "lynkros",
+    "bucket": "czwxc_1",
+    "aggregate_window": "5m",
+    "timezone": "Asia/Shanghai",
+    "type_code_format": "hex",
+    "point_code_include_0x": false,
+    "api_version": "v2"
+  }
+}

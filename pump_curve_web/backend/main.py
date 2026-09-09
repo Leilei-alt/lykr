@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import sys
 import os
+import csv
 import json
+import re
 import urllib.error
+import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -15,16 +18,27 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+import pymysql
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-REGRESSION_DIR = ROOT_DIR / "pump_curve_regression"
-CONFIG_PATH = ROOT_DIR / "pump_model_config" / "pump_model_config.template.json"
-COP_ASSET_DIR = ROOT_DIR / "COP_FIT_20260818" / "html" / "assets"
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+APP_DIR = Path(sys.executable).resolve().parent if IS_FROZEN else Path(__file__).resolve().parents[2]
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
+REGRESSION_DIR = RESOURCE_DIR / "pump_curve_regression"
+CONFIG_PATH = APP_DIR / "pump_model_config" / "pump_model_config.template.json"
+if not CONFIG_PATH.exists():
+    CONFIG_PATH = RESOURCE_DIR / "pump_model_config" / "pump_model_config.template.json"
+FRONTEND_DIST_DIR = RESOURCE_DIR / "frontend_dist"
+if not IS_FROZEN and not FRONTEND_DIST_DIR.exists():
+    FRONTEND_DIST_DIR = Path(__file__).resolve().parents[1] / "frontend" / "dist"
+FRONTEND_ASSET_DIR = FRONTEND_DIST_DIR / "assets"
+COP_ASSET_DIR = RESOURCE_DIR / "cop_assets"
+STATIC_DIR = APP_DIR / "static"
+RUNTIME_CONFIG_PATH = Path(os.getenv("PUMP_APP_CONFIG", str(APP_DIR / "pump_app_config.json")))
 
 sys.path.insert(0, str(REGRESSION_DIR))
 
@@ -36,45 +50,47 @@ from pump_curve_regression import (  # noqa: E402
 from sample_builder import (  # noqa: E402
     build_grouped_device_samples,
     read_config,
-    run_mysql,
     sql_quote,
 )
 
 
 class MysqlSettings(BaseModel):
-    mysql_exe: str = "G:\\mysql-8.0.46-winx64\\bin\\mysql.exe"
+    mysql_exe: str = ""
     host: str = "127.0.0.1"
     port: int = 3306
     user: str = "root"
-    password: str = "wdlwdl123."
+    password: str = ""
     database: str = "pump_curve_model"
 
 
 class CpnMysqlSettings(BaseModel):
-    mysql_exe: str = "G:\\mysql-8.0.46-winx64\\bin\\mysql.exe"
+    mysql_exe: str = ""
     host: str = "127.0.0.1"
     port: int = 3306
     user: str = "root"
-    password: str = "wdlwdl123."
+    password: str = ""
     database: str = "ly_czwxc"
     table: str = "ly_cpn"
 
 
 class InfluxSettings(BaseModel):
     url: str = "http://127.0.0.1:8086"
-    token: str = "aeALbvY_ikDyDa0s1UiljrkavEAjToUUznM82-CZFnYWGV2XdrlynZL8vYLM8pFEoOyFyS-Fndshb8vSuZ_zxg=="
+    token: str = ""
     org: str = "lynkros"
     bucket: str = "czwxc_1"
     aggregate_window: str = "5m"
     timezone: str = "Asia/Shanghai"
-    type_code_format: str = "decimal"
-    point_code_include_0x: bool = True
+    type_code_format: str = "hex"
+    point_code_include_0x: bool = False
+    api_version: str = "v3"
 
 
 class RegressionRequest(BaseModel):
     dataset_name: str = "sample_raw_points"
     start_time: str
     end_time: str
+    second_start_time: Optional[str] = None
+    second_end_time: Optional[str] = None
     side: str = ""
     source_types: List[str] = Field(default_factory=list)
     group_ids: List[str] = Field(default_factory=list)
@@ -82,6 +98,12 @@ class RegressionRequest(BaseModel):
     facility_ids: List[str] = Field(default_factory=list)
     pump_ids: List[str] = Field(default_factory=list)
     min_samples: int = 10
+    theory_a: Optional[float] = None
+    theory_b: Optional[float] = None
+    theory_c: Optional[float] = None
+    theory_j: Optional[float] = None
+    theory_k: Optional[float] = None
+    theory_l: Optional[float] = None
 
 
 app = FastAPI(title="Pump Curve Regression API")
@@ -95,7 +117,9 @@ app.add_middleware(
 
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-if COP_ASSET_DIR.exists():
+if FRONTEND_ASSET_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=str(FRONTEND_ASSET_DIR)), name="assets")
+elif COP_ASSET_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(COP_ASSET_DIR)), name="assets")
 
 DEVICE_TYPE_CHILLER = 32
@@ -109,7 +133,7 @@ SOURCE_TYPE_BY_CPN_TYPE = {
 
 INFLUX_POINTS = {
     "status": "0x00000200",
-    "pump_speed_ratio": "0x00000210",
+    "pump_speed_ratio": "0x00000201",
     "pump_head": "0x00000212",
     "pump_power": "0x00000220",
     "chiller_flow": "0x0000021D",
@@ -118,62 +142,96 @@ INFLUX_POINTS = {
 
 
 def mysql_settings() -> MysqlSettings:
-    return MysqlSettings()
+    values = runtime_config().get("model_mysql", {})
+    defaults = MysqlSettings()
+    return MysqlSettings(
+        host=os.getenv("PUMP_MODEL_MYSQL_HOST", values.get("host", defaults.host)),
+        port=int(os.getenv("PUMP_MODEL_MYSQL_PORT", values.get("port", defaults.port))),
+        user=os.getenv("PUMP_MODEL_MYSQL_USER", values.get("user", defaults.user)),
+        password=os.getenv("PUMP_MODEL_MYSQL_PASSWORD", values.get("password", defaults.password)),
+        database=os.getenv("PUMP_MODEL_MYSQL_DATABASE", values.get("database", defaults.database)),
+    )
 
 
 def cpn_mysql_settings() -> CpnMysqlSettings:
+    values = runtime_config().get("cpn_mysql", {})
+    defaults = CpnMysqlSettings()
     return CpnMysqlSettings(
-        mysql_exe=os.getenv("PUMP_CPN_MYSQL_EXE", CpnMysqlSettings().mysql_exe),
-        host=os.getenv("PUMP_CPN_MYSQL_HOST", CpnMysqlSettings().host),
-        port=int(os.getenv("PUMP_CPN_MYSQL_PORT", str(CpnMysqlSettings().port))),
-        user=os.getenv("PUMP_CPN_MYSQL_USER", CpnMysqlSettings().user),
-        password=os.getenv("PUMP_CPN_MYSQL_PASSWORD", CpnMysqlSettings().password),
-        database=os.getenv("PUMP_CPN_MYSQL_DATABASE", CpnMysqlSettings().database),
-        table=os.getenv("PUMP_CPN_MYSQL_TABLE", CpnMysqlSettings().table),
+        host=os.getenv("PUMP_CPN_MYSQL_HOST", values.get("host", defaults.host)),
+        port=int(os.getenv("PUMP_CPN_MYSQL_PORT", values.get("port", defaults.port))),
+        user=os.getenv("PUMP_CPN_MYSQL_USER", values.get("user", defaults.user)),
+        password=os.getenv("PUMP_CPN_MYSQL_PASSWORD", values.get("password", defaults.password)),
+        database=os.getenv("PUMP_CPN_MYSQL_DATABASE", values.get("database", defaults.database)),
+        table=os.getenv("PUMP_CPN_MYSQL_TABLE", values.get("table", defaults.table)),
     )
 
 
 def influx_settings() -> InfluxSettings:
+    values = runtime_config().get("influx", {})
+    defaults = InfluxSettings()
     return InfluxSettings(
-        url=os.getenv("PUMP_INFLUX_URL", InfluxSettings().url),
-        token=os.getenv("PUMP_INFLUX_TOKEN", InfluxSettings().token),
-        org=os.getenv("PUMP_INFLUX_ORG", InfluxSettings().org),
-        bucket=os.getenv("PUMP_INFLUX_BUCKET", InfluxSettings().bucket),
-        aggregate_window=os.getenv("PUMP_INFLUX_AGGREGATE_WINDOW", InfluxSettings().aggregate_window),
-        timezone=os.getenv("PUMP_INFLUX_TIMEZONE", InfluxSettings().timezone),
-        type_code_format=os.getenv("PUMP_INFLUX_TYPE_CODE_FORMAT", InfluxSettings().type_code_format),
-        point_code_include_0x=os.getenv("PUMP_INFLUX_POINT_INCLUDE_0X", "1").lower() in {"1", "true", "yes"},
+        url=os.getenv("PUMP_INFLUX_URL", values.get("url", defaults.url)),
+        token=os.getenv("PUMP_INFLUX_TOKEN", values.get("token", defaults.token)),
+        org=os.getenv("PUMP_INFLUX_ORG", values.get("org", defaults.org)),
+        bucket=os.getenv("PUMP_INFLUX_BUCKET", values.get("bucket", defaults.bucket)),
+        aggregate_window=os.getenv("PUMP_INFLUX_AGGREGATE_WINDOW", values.get("aggregate_window", defaults.aggregate_window)),
+        timezone=os.getenv("PUMP_INFLUX_TIMEZONE", values.get("timezone", defaults.timezone)),
+        type_code_format=os.getenv("PUMP_INFLUX_TYPE_CODE_FORMAT", values.get("type_code_format", defaults.type_code_format)),
+        point_code_include_0x=os.getenv(
+            "PUMP_INFLUX_POINT_INCLUDE_0X",
+            str(values.get("point_code_include_0x", defaults.point_code_include_0x)),
+        ).lower() in {"1", "true", "yes"},
+        api_version=os.getenv("PUMP_INFLUX_API_VERSION", values.get("api_version", defaults.api_version)),
     )
+
+
+def runtime_config() -> Dict[str, Any]:
+    if not RUNTIME_CONFIG_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(RUNTIME_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"运行配置文件无法读取: {RUNTIME_CONFIG_PATH}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail=f"运行配置文件必须是 JSON 对象: {RUNTIME_CONFIG_PATH}")
+    return payload
+
+
+def mysql_query_rows(settings: MysqlSettings | CpnMysqlSettings, sql: str) -> List[Dict[str, Any]]:
+    try:
+        connection = pymysql.connect(
+            host=settings.host,
+            port=settings.port,
+            user=settings.user,
+            password=settings.password,
+            database=settings.database,
+            charset="utf8mb4",
+            cursorclass=pymysql.cursors.DictCursor,
+            connect_timeout=10,
+            read_timeout=60,
+            write_timeout=60,
+        )
+    except pymysql.MySQLError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(sql)
+            return list(cursor.fetchall())
+    except pymysql.MySQLError as exc:
+        raise RuntimeError(str(exc)) from exc
+    finally:
+        connection.close()
 
 
 def mysql_output_rows(sql: str) -> List[Dict[str, str]]:
     settings = mysql_settings()
-    return parse_mysql_rows(
-        run_mysql(
-            Path(settings.mysql_exe),
-            settings.host,
-            settings.port,
-            settings.user,
-            settings.password,
-            sql,
-            settings.database,
-        )
-    )
+    return mysql_query_rows(settings, sql)
 
 
 def cpn_mysql_output_rows(sql: str) -> List[Dict[str, str]]:
     settings = cpn_mysql_settings()
-    return parse_mysql_rows(
-        run_mysql(
-            Path(settings.mysql_exe),
-            settings.host,
-            settings.port,
-            settings.user,
-            settings.password,
-            sql,
-            settings.database,
-        )
-    )
+    return mysql_query_rows(settings, sql)
 
 
 def sql_identifier(value: str) -> str:
@@ -292,6 +350,79 @@ def query_influx_points(
         return pd.DataFrame(columns=["sample_time", "device_id", "measurement", "value"])
 
     settings = influx_settings()
+    if _is_influx_v2(settings):
+        frame = _query_influx_v2_points(settings, cpn_names, measurements, start_time, end_time)
+    else:
+        frame = _query_influx_v3_points(settings, cpn_names, measurements, start_time, end_time)
+
+    if frame.empty:
+        return pd.DataFrame(columns=["sample_time", "device_id", "measurement", "value"])
+
+    return _align_influx_points(frame, settings)
+
+
+def _aggregate_window_delta(value: str) -> Optional[pd.Timedelta]:
+    text = str(value or "").strip().lower().replace(" ", "")
+    if text in {"", "0", "none", "off"}:
+        return None
+
+    token_pattern = re.compile(r"(\d+)(ns|us|ms|min|s|m|h|d|w)")
+    tokens = token_pattern.findall(text)
+    if not tokens or "".join(f"{amount}{unit}" for amount, unit in tokens) != text:
+        raise HTTPException(status_code=500, detail=f"Invalid Influx aggregate_window: {value}")
+
+    nanoseconds_per_unit = {
+        "ns": 1,
+        "us": 1_000,
+        "ms": 1_000_000,
+        "s": 1_000_000_000,
+        "m": 60 * 1_000_000_000,
+        "min": 60 * 1_000_000_000,
+        "h": 60 * 60 * 1_000_000_000,
+        "d": 24 * 60 * 60 * 1_000_000_000,
+        "w": 7 * 24 * 60 * 60 * 1_000_000_000,
+    }
+    total_nanoseconds = sum(int(amount) * nanoseconds_per_unit[unit] for amount, unit in tokens)
+    if total_nanoseconds <= 0:
+        return None
+    return pd.Timedelta(total_nanoseconds, unit="ns")
+
+
+def _align_influx_points(frame: pd.DataFrame, settings: InfluxSettings) -> pd.DataFrame:
+    aligned = frame.copy()
+    aligned["value"] = pd.to_numeric(aligned["value"], errors="coerce")
+    aligned["_raw_sample_time"] = (
+        pd.to_datetime(aligned["sample_time"], utc=True)
+        .dt.tz_convert(settings.timezone)
+        .dt.tz_localize(None)
+    )
+    aligned["sample_time"] = aligned["_raw_sample_time"]
+
+    window = _aggregate_window_delta(settings.aggregate_window)
+    if window is not None:
+        aligned["sample_time"] = aligned["sample_time"].dt.floor(window)
+
+    aligned = aligned.dropna(subset=["sample_time", "device_id", "measurement"])
+    aligned = aligned.sort_values("_raw_sample_time", kind="stable")
+    aligned = aligned.drop_duplicates(
+        subset=["sample_time", "device_id", "measurement"],
+        keep="last",
+    )
+    aligned["sample_time"] = aligned["sample_time"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    return aligned[["sample_time", "device_id", "measurement", "value"]].reset_index(drop=True)
+
+
+def _is_influx_v2(settings: InfluxSettings) -> bool:
+    return (settings.api_version or "").strip().lower() in {"2", "v2", "influxql"}
+
+
+def _query_influx_v3_points(
+    settings: InfluxSettings,
+    cpn_names: Sequence[str],
+    measurements: Sequence[str],
+    start_time: str,
+    end_time: str,
+) -> pd.DataFrame:
     cpn_filter = ", ".join(sql_string(item) for item in sorted(set(cpn_names)))
     start_utc = utc_flux_time(start_time)
     end_utc = utc_flux_time(end_time)
@@ -330,14 +461,99 @@ WHERE cpn_name IN ({cpn_filter})
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"无法读取 InfluxDB 数据: {exc}") from exc
 
-    frame = pd.DataFrame(rows)
-    if frame.empty:
-        return pd.DataFrame(columns=["sample_time", "device_id", "measurement", "value"])
+    return pd.DataFrame(rows)
 
-    frame["sample_time"] = pd.to_datetime(frame["sample_time"], utc=True).dt.tz_convert(settings.timezone).dt.tz_localize(None)
-    frame["sample_time"] = frame["sample_time"].dt.strftime("%Y-%m-%d %H:%M:%S")
-    frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
-    return frame[["sample_time", "device_id", "measurement", "value"]]
+
+def _flux_stop_utc(value: str) -> str:
+    settings = influx_settings()
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo(settings.timezone))
+    dt = dt.astimezone(ZoneInfo("UTC")) + timedelta(microseconds=1)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _query_influx_v2_points(
+    settings: InfluxSettings,
+    cpn_names: Sequence[str],
+    measurements: Sequence[str],
+    start_time: str,
+    end_time: str,
+) -> pd.DataFrame:
+    start_utc = utc_flux_time(start_time)
+    stop_utc = _flux_stop_utc(end_time)
+    measurement_conds = " or ".join(
+        f"r._measurement == {flux_string(item)}" for item in sorted(set(measurements))
+    )
+    cpn_conds = " or ".join(
+        f"r.cpn_name == {flux_string(item)}" for item in sorted(set(cpn_names))
+    )
+    flux = f"""from(bucket: {flux_string(settings.bucket)})
+  |> range(start: {start_utc}, stop: {stop_utc})
+  |> filter(fn: (r) => {measurement_conds})
+  |> filter(fn: (r) => {cpn_conds})
+  |> filter(fn: (r) => r._field == {flux_string("value")})
+  |> keep(columns: ["_time", "_value", "cpn_name", "_measurement"])
+  |> rename(columns: {{"_time": "sample_time", "_value": "value", "cpn_name": "device_id", "_measurement": "measurement"}})
+  |> yield(name: "rows")
+"""
+    payload = json.dumps(
+        {
+            "query": flux,
+            "type": "flux",
+            "dialect": {
+                "annotations": [],
+                "header": True,
+                "delimiter": ",",
+                "commentPrefix": "#",
+                "dateTimeFormat": "RFC3339",
+            },
+        }
+    ).encode("utf-8")
+    query_url = f"{settings.url.rstrip('/')}/api/v2/query?org={urllib.parse.quote(settings.org, safe='')}"
+    request = urllib.request.Request(
+        query_url,
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/csv",
+            "Authorization": f"Token {settings.token}",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            text = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise HTTPException(status_code=500, detail=f"无法读取 InfluxDB 数据: HTTP {exc.code}: {detail}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"无法读取 InfluxDB 数据: {exc}") from exc
+
+    return _parse_influx_v2_csv(text)
+
+
+def _parse_influx_v2_csv(text: str) -> pd.DataFrame:
+    empty_columns = ["sample_time", "device_id", "measurement", "value"]
+    header: Optional[List[str]] = None
+    rows: List[Dict[str, str]] = []
+    for line in text.splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        values = next(csv.reader([line]))
+        if header is None:
+            header = values
+            continue
+        if len(values) != len(header):
+            continue
+        if values == header:
+            continue
+        rows.append(dict(zip(header, values)))
+    if header is None:
+        return pd.DataFrame(columns=empty_columns)
+    return pd.DataFrame(rows, columns=header)
+
 
 
 def value_frame_for_devices(devices: pd.DataFrame, point_names: Sequence[str], start_time: str, end_time: str) -> pd.DataFrame:
@@ -391,7 +607,6 @@ def real_source_rows(start_time: str, end_time: str) -> Dict[str, pd.DataFrame]:
     pump_devices = catalog[catalog["cpn_type"] == DEVICE_TYPE_PUMP].copy()
 
     controller_roles = {
-        measurement_name(DEVICE_TYPE_HEADER, INFLUX_POINTS["status"]): "status",
         measurement_name(DEVICE_TYPE_HEADER, INFLUX_POINTS["header_flow"]): "flow_value",
     }
     chiller_roles = {
@@ -406,7 +621,7 @@ def real_source_rows(start_time: str, end_time: str) -> Dict[str, pd.DataFrame]:
     }
 
     controller_rows = pivot_device_values(
-        value_frame_for_devices(controller_devices, [INFLUX_POINTS["status"], INFLUX_POINTS["header_flow"]], start_time, end_time),
+        value_frame_for_devices(controller_devices, [INFLUX_POINTS["header_flow"]], start_time, end_time),
         controller_roles,
     )
     chiller_rows = pivot_device_values(
@@ -433,7 +648,7 @@ def real_source_rows(start_time: str, end_time: str) -> Dict[str, pd.DataFrame]:
 
     controller_rows = ensure_columns(
         controller_rows,
-        ["sample_time", "group_id", "device_id", "show_name", "cpn_name", "status", "flow_value", "source_type"],
+        ["sample_time", "group_id", "device_id", "show_name", "cpn_name", "flow_value", "source_type"],
     )
     chiller_rows = ensure_columns(
         chiller_rows,
@@ -450,6 +665,36 @@ def real_source_rows(start_time: str, end_time: str) -> Dict[str, pd.DataFrame]:
         "chiller_rows": chiller_rows,
         "pump_rows": pump_rows,
     }
+
+
+def merge_source_data(source_data_list: Sequence[Dict[str, pd.DataFrame]]) -> Dict[str, pd.DataFrame]:
+    if not source_data_list:
+        raise HTTPException(status_code=400, detail="没有可合并的时间段数据")
+
+    merged: Dict[str, pd.DataFrame] = {
+        "catalog": source_data_list[0]["catalog"],
+    }
+    deduplication_keys = {
+        "controller_rows": ["sample_time", "group_id", "device_id"],
+        "chiller_rows": ["sample_time", "group_id", "device_id"],
+        "pump_rows": ["sample_time", "group_id", "pump_id"],
+    }
+
+    for key, subset in deduplication_keys.items():
+        frames = [item[key] for item in source_data_list if not item[key].empty]
+        if not frames:
+            merged[key] = source_data_list[0][key].copy()
+            continue
+
+        frame = pd.concat(frames, ignore_index=True)
+        available_keys = [column for column in subset if column in frame.columns]
+        if available_keys:
+            frame = frame.drop_duplicates(subset=available_keys, keep="last")
+        if "sample_time" in frame.columns:
+            frame = frame.sort_values("sample_time", kind="stable").reset_index(drop=True)
+        merged[key] = frame
+
+    return merged
 
 
 def ensure_columns(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
@@ -643,17 +888,7 @@ WHERE s.active = 1
 ORDER BY s.id, p.point_index;
 """
     try:
-        rows = parse_mysql_rows(
-            run_mysql(
-                Path(settings.mysql_exe),
-                settings.host,
-                settings.port,
-                settings.user,
-                settings.password,
-                sql,
-                settings.database,
-            )
-        )
+        rows = mysql_query_rows(settings, sql)
     except RuntimeError:
         return {"head": [], "efficiency": []}
 
@@ -724,10 +959,49 @@ def build_scatter_only_chart_data(samples) -> Dict[str, Any]:
     }
 
 
-def build_chart_data(result, samples) -> Dict[str, Any]:
+def theory_lines_from_coefficients(
+    coefficients: Dict[str, Optional[float]],
+    q_eq_grid: np.ndarray,
+) -> Dict[str, List[Dict[str, Any]]]:
+    parsed = []
+    for key in ("a", "b", "c", "j", "k", "l"):
+        value = finite_float(coefficients.get(key))
+        if value is None:
+            return {"head": [], "efficiency": []}
+        parsed.append(value)
+    a, b, c, j, k, l = parsed
+
+    head_values = predict_quadratic([a, b, c], q_eq_grid)
+    efficiency_values = predict_quadratic([j, k, l], q_eq_grid)
+    return {
+        "head": [
+            {
+                "name": "理论拟合曲线",
+                "points": line_points(q_eq_grid, head_values),
+                "line_type": "dashed",
+            }
+        ],
+        "efficiency": [
+            {
+                "name": "理论拟合曲线",
+                "points": line_points(q_eq_grid, efficiency_values),
+                "line_type": "dashed",
+            }
+        ],
+    }
+
+
+def build_chart_data(
+    result,
+    samples,
+    theory_coefficients: Optional[Dict[str, Optional[float]]] = None,
+) -> Dict[str, Any]:
     q_eq_grid = np.linspace(float(samples["Q_eq"].min()), float(samples["Q_eq"].max()), 120)
     w_curves = representative_speed_ratios(samples["w"])
-    theory_lines = query_theory_curves(result.pump_id, result.side, result.group_id)
+    if theory_coefficients:
+        theory_lines = theory_lines_from_coefficients(theory_coefficients, q_eq_grid)
+    else:
+        theory_lines = query_theory_curves(result.pump_id, result.side, result.group_id)
 
     a = result.head_coefficients["a"]
     b = result.head_coefficients["b"]
@@ -960,7 +1234,20 @@ def regression(request: RegressionRequest) -> Dict[str, Any]:
 
     start_time = normalize_datetime(request.start_time)
     end_time = normalize_datetime(request.end_time)
-    source_data = real_source_rows(start_time, end_time)
+    time_ranges = [(start_time, end_time)]
+    has_second_start = bool(request.second_start_time)
+    has_second_end = bool(request.second_end_time)
+    if has_second_start != has_second_end:
+        raise HTTPException(status_code=400, detail="第二时间段需要同时填写开始时间和结束时间")
+    if has_second_start and has_second_end:
+        second_start_time = normalize_datetime(request.second_start_time or "")
+        second_end_time = normalize_datetime(request.second_end_time or "")
+        time_ranges.append((second_start_time, second_end_time))
+
+    source_data = merge_source_data([
+        real_source_rows(range_start, range_end)
+        for range_start, range_end in time_ranges
+    ])
     controller_rows = source_data["controller_rows"]
     chiller_rows = source_data["chiller_rows"]
     pump_rows = source_data["pump_rows"]
@@ -990,39 +1277,76 @@ def regression(request: RegressionRequest) -> Dict[str, Any]:
         pump_ids=selected_pump_ids,
         flow_device_ids=None,
     )
-    if samples.empty:
-        raise HTTPException(status_code=400, detail="当前条件下没有可用于回归的有效样本")
-
-    candidate_pumps = pump_rows[
+    candidate_pump_rows = pump_rows[
         pump_rows["group_id"].astype(str).isin(group_ids)
-        & (pump_rows["status"].fillna(0) > 0)
-    ]["pump_id"].dropna().astype(str).unique().tolist()
+    ].copy()
+    candidate_pumps = candidate_pump_rows[
+        "pump_id"
+    ].dropna().astype(str).unique().tolist()
     if selected_pump_ids:
-        candidate_pumps = [pump_id for pump_id in selected_pump_ids if pump_id in set(candidate_pumps)]
-        samples = samples[samples["pump_id"].astype(str).isin(candidate_pumps)].copy()
-        if samples.empty:
-            raise HTTPException(status_code=400, detail="选中的水泵没有有效样本")
+        available_pumps = set(candidate_pumps)
+        candidate_pumps = [pump_id for pump_id in selected_pump_ids if pump_id in available_pumps]
+        if "pump_id" in samples.columns:
+            samples = samples[samples["pump_id"].astype(str).isin(candidate_pumps)].copy()
+
+    raw_theory = {
+        "a": request.theory_a,
+        "b": request.theory_b,
+        "c": request.theory_c,
+        "j": request.theory_j,
+        "k": request.theory_k,
+        "l": request.theory_l,
+    }
+    theory_coefficients = (
+        raw_theory
+        if all(finite_float(value) is not None for value in raw_theory.values())
+        else None
+    )
 
     results = []
     skipped = []
     for pump_id in sorted(candidate_pumps):
-        pump_samples = samples[samples["pump_id"].astype(str) == str(pump_id)].copy()
+        if "pump_id" in samples.columns:
+            pump_samples = samples[samples["pump_id"].astype(str) == str(pump_id)].copy()
+        else:
+            pump_samples = pd.DataFrame(columns=["Q", "H", "w", "eta"])
+
+        metadata_rows = candidate_pump_rows[
+            candidate_pump_rows["pump_id"].astype(str) == str(pump_id)
+        ]
+        pump_group_id = (
+            str(metadata_rows["group_id"].dropna().iloc[0])
+            if not metadata_rows.empty and metadata_rows["group_id"].notna().any()
+            else None
+        )
+        running_count = int(
+            (
+                pd.to_numeric(metadata_rows["status"], errors="coerce").fillna(0) > 0
+            ).sum()
+        ) if "status" in metadata_rows.columns else 0
+
         fit_available = len(pump_samples) >= request.min_samples
+        if fit_available:
+            fit_reason = None
+        elif running_count == 0:
+            fit_reason = "no running records in selected time range"
+        else:
+            fit_reason = f"only {len(pump_samples)} valid samples"
         if not fit_available:
-            skipped.append({"pump_id": pump_id, "reason": f"only {len(pump_samples)} valid samples"})
+            skipped.append({"pump_id": pump_id, "reason": fit_reason})
 
         charts = build_scatter_only_chart_data(pump_samples)
         result_payload: Dict[str, Any] = {
             "pump_id": str(pump_id),
-            "group_id": str(pump_samples["group_id"].dropna().iloc[0]) if not pump_samples.empty and pump_samples["group_id"].notna().any() else None,
-            "side": str(pump_samples["side"].dropna().iloc[0]) if not pump_samples.empty and pump_samples["side"].notna().any() else None,
+            "group_id": str(pump_samples["group_id"].dropna().iloc[0]) if not pump_samples.empty and pump_samples["group_id"].notna().any() else pump_group_id,
+            "side": str(pump_samples["side"].dropna().iloc[0]) if not pump_samples.empty and pump_samples["side"].notna().any() else group_sources.get(pump_group_id),
             "sample_count": int(len(pump_samples)),
             "q_min": float(pump_samples["Q"].min()) if not pump_samples.empty else None,
             "q_max": float(pump_samples["Q"].max()) if not pump_samples.empty else None,
             "w_min": float(pump_samples["w"].min()) if not pump_samples.empty else None,
             "w_max": float(pump_samples["w"].max()) if not pump_samples.empty else None,
             "fit_available": fit_available,
-            "fit_reason": None if fit_available else f"only {len(pump_samples)} valid samples",
+            "fit_reason": fit_reason,
             "charts": charts,
         }
 
@@ -1040,7 +1364,7 @@ def regression(request: RegressionRequest) -> Dict[str, Any]:
                     "efficiency_coefficients": result.efficiency_coefficients,
                     "head_metrics": result.head_metrics.__dict__,
                     "efficiency_metrics": result.efficiency_metrics.__dict__,
-                    "charts": build_chart_data(result, fitted),
+"charts": build_chart_data(result, fitted, theory_coefficients=theory_coefficients),
                 }
             )
 
@@ -1049,6 +1373,7 @@ def regression(request: RegressionRequest) -> Dict[str, Any]:
     if not results:
         return {
             "request": request.dict(),
+            "merged_time_range_count": len(time_ranges),
             "inferred_group_ids": group_ids,
             "inferred_source_types": source_types,
             "groups": build_group_payload(pump_rows, samples, results, skipped, group_sources),
@@ -1068,6 +1393,7 @@ def regression(request: RegressionRequest) -> Dict[str, Any]:
 
     return {
         "request": request.dict(),
+        "merged_time_range_count": len(time_ranges),
         "inferred_group_ids": group_ids,
         "inferred_source_types": source_types,
         "groups": build_group_payload(pump_rows, samples, results, skipped, group_sources),
@@ -1084,3 +1410,16 @@ def regression(request: RegressionRequest) -> Dict[str, Any]:
         "results": results,
         "skipped": skipped,
     }
+
+
+if FRONTEND_DIST_DIR.exists():
+    @app.get("/{path:path}", include_in_schema=False)
+    def frontend(path: str):
+        frontend_root = FRONTEND_DIST_DIR.resolve()
+        requested = (frontend_root / path).resolve()
+        if requested.is_relative_to(frontend_root) and requested.is_file():
+            return FileResponse(requested)
+        index_path = frontend_root / "index.html"
+        if index_path.is_file():
+            return FileResponse(index_path)
+        raise HTTPException(status_code=404, detail="前端页面不存在")

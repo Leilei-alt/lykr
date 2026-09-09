@@ -6,7 +6,7 @@
     "head_unit": "m",
     "power_unit": "kW",
     "efficiency_factor": 0.00275,
-    "speed_ratio_tolerance": 0.02,
+    "speed_ratio_tolerance": 0.002,
     "valid_filters": {
       "min_flow": 0,
       "min_head": 0,

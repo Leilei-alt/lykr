@@ -30,7 +30,7 @@ DEVICE_TYPE_HEADER = 38
 
 POINTS = {
     "status": "0x00000200",
-    "pump_speed_ratio": "0x00000210",
+    "pump_speed_ratio": "0x00000201",
     "pump_head": "0x00000212",
     "pump_power": "0x00000220",
     "chiller_flow": "0x0000021D",
@@ -108,7 +108,7 @@ ORDER BY group_id, cpn_type, true_cpn_name;
 
 
 def measurement(cpn_type: int, point_name: str) -> str:
-    return f"ly_{cpn_type:02d}_FFFFFFFF_{point_name}"
+    return f"ly_{cpn_type:02X}_FFFFFFFF_{point_name.replace('0x', '')}"
 
 
 def lp_escape(value: str) -> str:
@@ -211,7 +211,8 @@ def build_lines(catalog: List[Dict[str, str]], args: argparse.Namespace) -> List
                     for device_index, device_name in enumerate(devices):
                         status = source_runs[device_index] if source_runs else 0
                         flow = source_flow(group_index, device_index, sample_index, phase, status, cpn_type)
-                        all_lines.append(line(measurement(cpn_type, POINTS["status"]), device_name, status, ts_ns))
+                        if cpn_type != DEVICE_TYPE_HEADER:
+                            all_lines.append(line(measurement(cpn_type, POINTS["status"]), device_name, status, ts_ns))
                         all_lines.append(line(measurement(cpn_type, flow_point), device_name, flow, ts_ns))
 
     return all_lines

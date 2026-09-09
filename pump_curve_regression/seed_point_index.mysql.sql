@@ -24,12 +24,11 @@ INSERT INTO pump_point_index
   (device_type, point_name, point_role, target_table, target_column, unit, data_type, description, active)
 VALUES
   ('pump', '0x00000200', 'pump_status', 'pump_device_values', 'status', 'bool', 'TINYINT', 'Pump running status: 1 means running, 0 means stopped.', 1),
-  ('pump', '0x00000210', 'pump_speed_ratio', 'pump_device_values', 'speed_ratio', NULL, 'DOUBLE', 'Pump speed ratio w.', 1),
+  ('pump', '0x00000201', 'pump_speed_ratio', 'pump_device_values', 'speed_ratio', NULL, 'DOUBLE', 'Pump speed ratio w.', 1),
   ('pump', '0x00000212', 'pump_head', 'pump_device_values', 'head', 'm', 'DOUBLE', 'Pump head H.', 1),
   ('pump', '0x00000220', 'pump_power', 'pump_device_values', 'power_kw', 'kW', 'DOUBLE', 'Pump current electric power P.', 1),
   ('chiller', '0x00000200', 'chiller_status', 'pump_chiller_values', 'status', 'bool', 'TINYINT', 'Chiller running status: 1 means running, 0 means stopped.', 1),
   ('chiller', '0x0000021D', 'chiller_flow', 'pump_chiller_values', 'flow_value', 'm3/h', 'DOUBLE', 'Chiller flow Q.', 1),
-  ('header_controller', '0x00000200', 'header_controller_status', 'pump_header_controller_values', 'status', 'bool', 'TINYINT', 'Header controller running status: 1 means running, 0 means stopped.', 1),
   ('header_controller', '0x0000024A', 'header_controller_flow', 'pump_header_controller_values', 'flow_value', 'm3/h', 'DOUBLE', 'Header controller water flow Q.', 1)
 ON DUPLICATE KEY UPDATE
   point_role = VALUES(point_role),

@@ -26,7 +26,7 @@ http://127.0.0.1:5174
 ## Data Flow
 
 ```text
-Vue time range
+Vue time range + theory coefficients (H-Q a/b/c, eta-Q j/k/l)
   -> FastAPI /api/regression
   -> MySQL ly_czwxc.ly_cpn reads device catalog, names, types, and group_id
   -> InfluxDB czwxc_1 reads time-series values by true_cpn_name and point measurement
@@ -34,7 +34,7 @@ Vue time range
   -> calculate every group and every running pump in the selected time range
   -> sum flow by source type, sample_time, and group_id
   -> match running pumps in the same group
-  -> discard group/time samples when max(w)-min(w) > 0.02
+  -> discard group/time samples when max(w)-min(w) > 0.002
   -> allocate Q_total equally to running pumps
   -> derive Q/H/w/eta and fit pumps with at least 10 valid samples
   -> return grouped fit results to Vue
@@ -66,7 +66,7 @@ InfluxDB now stores the time-series values in:
 
 ```text
 bucket/database: czwxc_1
-measurement format: ly_{cpn_type}_FFFFFFFF_{point_name}
+measurement format: ly_{cpn_type_hex}_FFFFFFFF_{point_code} (cpn_type 32/36/38 -> 20/24/26 hex, point_code without 0x prefix)
 tag filter: cpn_name = ly_cpn.true_cpn_name
 field filter: _field = value
 ```
@@ -74,14 +74,13 @@ field filter: _field = value
 Point mapping:
 
 ```text
-ly_32_FFFFFFFF_0x00000200: chiller status
-ly_32_FFFFFFFF_0x0000021D: chiller flow
-ly_36_FFFFFFFF_0x00000200: pump status
-ly_36_FFFFFFFF_0x00000210: pump speed ratio w
-ly_36_FFFFFFFF_0x00000212: pump head H
-ly_36_FFFFFFFF_0x00000220: pump power P
-ly_38_FFFFFFFF_0x00000200: header controller status
-ly_38_FFFFFFFF_0x0000024A: header controller flow
+ly_20_FFFFFFFF_00000200: chiller status
+ly_20_FFFFFFFF_0000021D: chiller flow
+ly_24_FFFFFFFF_00000200: pump status
+ly_24_FFFFFFFF_00000201: pump speed ratio w
+ly_24_FFFFFFFF_00000212: pump head H
+ly_24_FFFFFFFF_00000220: pump power P
+ly_26_FFFFFFFF_0000024A: header controller flow
 ```
 
 Runtime connection defaults can be overridden with environment variables:
@@ -102,7 +101,24 @@ PUMP_INFLUX_AGGREGATE_WINDOW
 PUMP_INFLUX_TIMEZONE
 PUMP_INFLUX_TYPE_CODE_FORMAT
 PUMP_INFLUX_POINT_INCLUDE_0X
+PUMP_INFLUX_API_VERSION
 ```
+
+### InfluxDB v2 / v3 switch
+
+The backend reads time-series values through the InfluxDB v3 SQL API
+(`POST /api/v3/query_sql`) by default. When the target InfluxDB is v2,
+set `"api_version": "v2"` in the `influx` section of `pump_app_config.json`
+(or the `PUMP_INFLUX_API_VERSION` environment variable). In v2 mode the
+backend queries `POST /api/v2/query` with Flux and parses the CSV response
+using the same `org`, `bucket`, measurement, and `cpn_name` settings.
+
+The `aggregate_window` setting is applied by the backend after either the v2
+or v3 query. Timestamps are converted to the configured timezone, assigned to
+natural windows (for example, `5m`), and the last value for each device and
+measurement in each window is retained. This allows independently collected
+status, speed, head, power, and flow points to be joined without requiring
+their raw timestamps to match to the exact second.
 
 The old demo seed commands below are kept only for local simulated-data tests:
 
